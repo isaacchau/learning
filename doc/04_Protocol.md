@@ -200,6 +200,15 @@ static const size_t RECV_BUFFER_SIZE = 65536;  // 64KB
 **Why MAX_MSG_LEN = 65535?**
 Because `respLen` is `uint16_t` (16 bits), which maxes out at 65535.
 
+### Defensive Programming Note
+
+The validation code checks:
+```cpp
+if (resp.respLen < MIN_MSG_LEN || resp.respLen > MAX_MSG_LEN) { ... }
+```
+
+While the `> MAX_MSG_LEN` check is currently redundant (a `uint16_t` cannot exceed 65535), it is intentionally kept as **future-proofing**. If the protocol is later updated to use `uint32_t` for larger messages, this check becomes meaningful immediately. Modern compilers optimize away the always-false branch anyway, so there's no runtime cost.
+
 **Why 64KB receive buffer?**
 - Larger than max message size
 - Good balance between memory usage and efficiency

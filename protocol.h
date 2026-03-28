@@ -4,7 +4,9 @@
 #include "shared_ptr_pool.h"
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>  // std::getenv
 #include <memory>
+#include <string>   // std::stoul
 
 // ============================================================================
 // Wire-format protocol structures (packed, no padding)
@@ -39,10 +41,38 @@ struct MsgHdr {
 // Protocol constants
 // ============================================================================
 
-static const uint32_t MAGIC_KEY = 0xCAFEBABE;
+// Magic key can be overridden via environment variable for testing/customization.
+// Default: 0xCAFEBABE (classic Java magic number, easy to spot in hex dumps).
+// To override: export APP_TCP_MAGIC_KEY="0xDEADBEEF"
+inline uint32_t getMagicKey() {
+    const char* env = std::getenv("APP_TCP_MAGIC_KEY");
+    if (env) {
+        try {
+            return static_cast<uint32_t>(std::stoul(env, nullptr, 0));
+        } catch (...) {
+            // Fall through to default on parse error
+        }
+    }
+    return 0xCAFEBABE;
+}
+
 static const size_t MIN_MSG_LEN = sizeof(TcpResponse) + sizeof(MsgHdr); // 24
 static const size_t MAX_MSG_LEN = 65535;
-static const size_t RECV_BUFFER_SIZE = 65536; // 64KB
+
+// Receive buffer size (configurable via APP_TCP_RECV_BUFFER_SIZE env var).
+// Default: 65536 (64KB). Must be >= MAX_MSG_LEN.
+inline size_t getRecvBufferSize() {
+    const char* env = std::getenv("APP_TCP_RECV_BUFFER_SIZE");
+    if (env) {
+        try {
+            size_t size = static_cast<size_t>(std::stoul(env));
+            if (size >= MAX_MSG_LEN) return size;
+        } catch (...) {
+            // Fall through to default on parse error
+        }
+    }
+    return 65536; // 64KB default
+}
 
 // ============================================================================
 // Internal message types passed through the pipeline

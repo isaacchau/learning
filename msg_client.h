@@ -85,8 +85,15 @@ private:
 #include <chrono>
 #include <future>
 
-// Join a thread with timeout (milliseconds)
-// Returns true if thread joined successfully, false if timeout
+#ifdef __linux__
+#include <pthread.h>
+#endif
+
+// Join a thread with timeout (milliseconds).
+// Returns true if thread joined successfully, false if timeout.
+// NOTE: This function does NOT detach the thread on timeout - doing so would
+// risk use-after-free when the destructor runs while detached threads still
+// access member variables.
 inline bool joinWithTimeout(std::thread& t, int timeout_ms) {
     if (!t.joinable()) return true;
     
@@ -99,6 +106,29 @@ inline bool joinWithTimeout(std::thread& t, int timeout_ms) {
         return false;  // Timeout - thread did not join
     }
     return true;
+}
+
+// Platform-specific thread cancellation (Linux only).
+// This is a last-resort measure for threads that won't stop gracefully.
+// NOTE: Cancellation is asynchronous and dangerous - the thread may be in
+// an inconsistent state. Only use during shutdown when you're about to exit.
+// Returns true if cancellation was attempted, false on non-Linux platforms.
+inline bool cancelThread(std::thread& t) {
+    if (!t.joinable()) return false;
+    
+#ifdef __linux__
+    // pthread_cancel requests cancellation at the next cancellation point
+    // The thread should exit if it's blocking on I/O, sleeping, or at other
+    // cancellation points. This is safer than detaching because:
+    // 1. Thread will stop (eventually)
+    // 2. No use-after-free risk since thread stops
+    int result = pthread_cancel(t.native_handle());
+    if (result == 0) {
+        return true;
+    }
+#endif
+    // On non-Linux platforms, we cannot safely force-stop a thread
+    return false;
 }
 
 // ============================================================================
@@ -122,12 +152,20 @@ namespace Defaults {
     constexpr size_t        DECODED_QUEUE_SIZE   = 8192;  // Per-worker SPSC queue
     
     constexpr int           RECONNECT_INTERVAL_MS= 3000;
+    constexpr int           RECONNECT_MIN_MS     = 1000;  // Exponential backoff min
+    constexpr int           RECONNECT_MAX_MS     = 60000; // Exponential backoff max (1 min)
+    constexpr double        RECONNECT_BACKOFF_MULT = 2.0; // Backoff multiplier
     constexpr int           STATS_INTERVAL_SEC   = 5;
     
     // Timeouts
     constexpr int           POLL_TIMEOUT_MS      = 100;   // poll() wait time
     constexpr int           QUEUE_POP_TIMEOUT_MS = 100;   // Queue pop wait time
-    constexpr int           THREAD_JOIN_TIMEOUT_MS = 5000; // Thread join timeout
+    constexpr int           THREAD_JOIN_TIMEOUT_MS = 30000; // Thread join timeout (30s - very generous)
+    
+    // Connection health check
+    // Default: 0 (disabled) - accommodates busy/quiet periods during the day.
+    // If enabled, force reconnect if no data for specified milliseconds.
+    constexpr int           CONN_IDLE_TIMEOUT_MS = 0;
     
     // Push wait timeout for queues (when full)
     // NOTE: This uses a "drop" strategy rather than backpressure.
@@ -294,6 +332,10 @@ private:
 
     // Statistics
     MsgClientStats stats_;
+    
+    // Connection state (IO thread only)
+    int current_reconnect_delay_ms_;       // Current backoff delay, reset on success
+    std::chrono::steady_clock::time_point last_recv_time_; // Last data received
 };
 
 #endif // MSG_CLIENT_H

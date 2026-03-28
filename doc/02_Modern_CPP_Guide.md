@@ -241,7 +241,8 @@ v.push_back(3);
 std::vector<int> v = {1, 2, 3};  // Uniform initialization
 
 // In this codebase - size class configs
-return {{64, 64, 512}, {256, 64, 512}, {1024, 64, 512}};
+// Format: {block_size, initial_count, max_free_list, max_total_allocated}
+return {{64, 64, 512, 1024}, {256, 64, 512, 1024}, {1024, 64, 512, 1024}};
 ```
 
 ---

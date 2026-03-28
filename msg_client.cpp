@@ -95,6 +95,8 @@ std::string MsgClientConfig::validate() const {
 MsgClient::MsgClient(const MsgClientConfig& config)
     : config_(config)
     , running_(false)
+    , current_reconnect_delay_ms_(config.reconnect_interval_ms)
+    , last_recv_time_(std::chrono::steady_clock::now())
 {
     // Clamp worker count
     if (config_.worker_thread_count < Defaults::MIN_WORKER_THREADS) {
@@ -158,40 +160,73 @@ void MsgClient::stop() {
     // Close socket to unblock any blocking recv/poll
     closeSocket();
 
-    // Join threads with timeout (5 seconds each)
+    // Join threads with a two-phase approach:
+    // 1. Try graceful shutdown (wait for threads to notice running_=false)
+    // 2. If that fails, force cancellation (Linux only) and join again
+    // 3. Never detach - detached threads accessing member variables after
+    //    destruction causes use-after-free crashes.
     const int JOIN_TIMEOUT_MS = Defaults::THREAD_JOIN_TIMEOUT_MS;
-    bool io_joined = true, decoder_joined = true;
+    const int CANCEL_JOIN_TIMEOUT_MS = 2000;  // Shorter timeout after cancel
+    bool io_cancelled = false, decoder_cancelled = false;
     
     if (io_thread_.joinable()) {
-        io_joined = joinWithTimeout(io_thread_, JOIN_TIMEOUT_MS);
-        if (!io_joined) {
-            LOG_ERR("[MsgClient] IO thread did not stop within %d ms", JOIN_TIMEOUT_MS);
-            // Forcefully detach to prevent crash on destruction
-            io_thread_.detach();
+        if (!joinWithTimeout(io_thread_, JOIN_TIMEOUT_MS)) {
+            LOG_WARN("[MsgClient] IO thread did not stop gracefully within %d ms, "
+                     "attempting force cancellation...", JOIN_TIMEOUT_MS);
+            io_cancelled = cancelThread(io_thread_);
+            if (io_cancelled) {
+                // Try to join after cancellation (thread should stop soon)
+                if (!joinWithTimeout(io_thread_, CANCEL_JOIN_TIMEOUT_MS)) {
+                    LOG_ERR("[MsgClient] CRITICAL: IO thread did not stop even after "
+                            "cancellation. This may indicate a bug. Continuing anyway...");
+                    // Still don't detach - the thread might stop later
+                }
+            } else {
+                LOG_ERR("[MsgClient] CRITICAL: Could not cancel IO thread (non-Linux "
+                        "platform or thread not joinable). Waiting longer...");
+                // Last resort: try joining with a very long timeout
+                joinWithTimeout(io_thread_, 60000);  // 60 seconds
+            }
         }
     }
     
     if (decoder_thread_.joinable()) {
-        decoder_joined = joinWithTimeout(decoder_thread_, JOIN_TIMEOUT_MS);
-        if (!decoder_joined) {
-            LOG_ERR("[MsgClient] Decoder thread did not stop within %d ms", JOIN_TIMEOUT_MS);
-            decoder_thread_.detach();
+        if (!joinWithTimeout(decoder_thread_, JOIN_TIMEOUT_MS)) {
+            LOG_WARN("[MsgClient] Decoder thread did not stop gracefully within %d ms, "
+                     "attempting force cancellation...", JOIN_TIMEOUT_MS);
+            decoder_cancelled = cancelThread(decoder_thread_);
+            if (decoder_cancelled) {
+                if (!joinWithTimeout(decoder_thread_, CANCEL_JOIN_TIMEOUT_MS)) {
+                    LOG_ERR("[MsgClient] CRITICAL: Decoder thread did not stop even after "
+                            "cancellation. This may indicate a bug. Continuing anyway...");
+                }
+            } else {
+                LOG_ERR("[MsgClient] CRITICAL: Could not cancel Decoder thread. "
+                        "Waiting longer...");
+                joinWithTimeout(decoder_thread_, 60000);
+            }
         }
     }
     
     for (auto& t : worker_threads_) {
         if (t.joinable()) {
             if (!joinWithTimeout(t, JOIN_TIMEOUT_MS)) {
-                LOG_ERR("[MsgClient] Worker thread did not stop within %d ms", JOIN_TIMEOUT_MS);
-                t.detach();
+                LOG_WARN("[MsgClient] Worker thread did not stop gracefully within %d ms, "
+                         "attempting force cancellation...", JOIN_TIMEOUT_MS);
+                if (cancelThread(t)) {
+                    joinWithTimeout(t, CANCEL_JOIN_TIMEOUT_MS);
+                } else {
+                    joinWithTimeout(t, 60000);
+                }
             }
         }
     }
     worker_threads_.clear();
     
-    // Log summary if any threads timed out
-    if (!io_joined || !decoder_joined) {
-        LOG_WARN("[MsgClient] Some threads required forceful detach during shutdown");
+    // Log summary if any threads required cancellation
+    if (io_cancelled || decoder_cancelled) {
+        LOG_WARN("[MsgClient] Some threads required force cancellation during shutdown. "
+                 "Review thread loop logic if this happens frequently.");
     }
 }
 
@@ -297,7 +332,7 @@ bool MsgClient::connectToServer() {
 bool MsgClient::sendSubscription() {
     TcpRequest req;
     std::memset(&req, 0, sizeof(req));
-    req.reqKey = MAGIC_KEY;
+    req.reqKey = getMagicKey();
     snprintf(req.reqItem, sizeof(req.reqItem), "%s", config_.item_name.c_str());
     req.lastRespSeq = config_.starting_seq_num;
     snprintf(req.clientID, sizeof(req.clientID), "MsgClient");
@@ -321,27 +356,41 @@ void MsgClient::closeSocket() {
 
 void MsgClient::ioLoop() {
     while (running_.load(std::memory_order_relaxed)) {
-        // Connect (with reconnection)
+        // Connect (with exponential backoff reconnection)
         if (!connectToServer()) {
             if (!running_.load(std::memory_order_relaxed)) break;
+            LOG_INFO("[MsgClient] Connection failed, retrying in %d ms...", 
+                     current_reconnect_delay_ms_);
             std::this_thread::sleep_for(
-                std::chrono::milliseconds(config_.reconnect_interval_ms));
+                std::chrono::milliseconds(current_reconnect_delay_ms_));
             stats_.reconnect_count.fetch_add(1, std::memory_order_relaxed);
+            // Exponential backoff: double the delay, cap at max
+            current_reconnect_delay_ms_ = std::min(
+                static_cast<int>(current_reconnect_delay_ms_ * Defaults::RECONNECT_BACKOFF_MULT),
+                Defaults::RECONNECT_MAX_MS);
             continue;
         }
+
+        // Reset backoff and health check timer on successful connection
+        current_reconnect_delay_ms_ = config_.reconnect_interval_ms;
+        last_recv_time_ = std::chrono::steady_clock::now();
 
         // Send subscription request
         if (!sendSubscription()) {
             LOG_ERR("[MsgClient] Failed to send subscription, reconnecting...");
             closeSocket();
             std::this_thread::sleep_for(
-                std::chrono::milliseconds(config_.reconnect_interval_ms));
+                std::chrono::milliseconds(current_reconnect_delay_ms_));
             stats_.reconnect_count.fetch_add(1, std::memory_order_relaxed);
+            // Exponential backoff for subscription failures too
+            current_reconnect_delay_ms_ = std::min(
+                static_cast<int>(current_reconnect_delay_ms_ * Defaults::RECONNECT_BACKOFF_MULT),
+                Defaults::RECONNECT_MAX_MS);
             continue;
         }
 
         // Allocate initial receive buffer from pool
-        auto recv_buf = pool_->allocate(RECV_BUFFER_SIZE);
+        auto recv_buf = pool_->allocate(getRecvBufferSize());
         if (!recv_buf) {
             LOG_ERR("[MsgClient] Failed to allocate receive buffer - memory pool exhausted");
             break;
@@ -362,7 +411,19 @@ void MsgClient::ioLoop() {
                 LOG_ERR("[MsgClient] poll() error: %s", strerror(errno));
                 break;
             }
-            if (ret == 0) continue; // timeout — re-check running_
+            if (ret == 0) {
+                // Timeout — check for idle connection (health check)
+                if (Defaults::CONN_IDLE_TIMEOUT_MS > 0) {
+                    auto idle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - last_recv_time_).count();
+                    if (idle_ms > Defaults::CONN_IDLE_TIMEOUT_MS) {
+                        LOG_ERR("[MsgClient] Connection idle for %ld ms (timeout: %d ms), forcing reconnect",
+                                idle_ms, Defaults::CONN_IDLE_TIMEOUT_MS);
+                        break; // Force reconnect
+                    }
+                }
+                continue; // re-check running_
+            }
 
             if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
                 LOG_ERR("[MsgClient] Socket error event");
@@ -375,7 +436,7 @@ void MsgClient::ioLoop() {
                 // Buffer full but no complete message — protocol error
                 LOG_WARN("[MsgClient] Recv buffer full, no complete message");
                 stats_.parse_errors.fetch_add(1, std::memory_order_relaxed);
-                recv_buf = pool_->allocate(RECV_BUFFER_SIZE);
+                recv_buf = pool_->allocate(getRecvBufferSize());
                 if (!recv_buf) {
                     LOG_ERR("[MsgClient] Failed to allocate receive buffer - memory pool exhausted");
                     break;
@@ -394,6 +455,9 @@ void MsgClient::ioLoop() {
                 break;
             }
 
+            // Update last receive time for connection health check
+            last_recv_time_ = std::chrono::steady_clock::now();
+
             recv_used += static_cast<size_t>(n);
             stats_.bytes_received.fetch_add(static_cast<uint64_t>(n),
                                             std::memory_order_relaxed);
@@ -408,6 +472,10 @@ void MsgClient::ioLoop() {
                 std::memcpy(&resp, recv_buf->data + parse_pos, sizeof(TcpResponse));
 
                 // Validate message length
+                // NOTE: The > MAX_MSG_LEN check is currently redundant since respLen
+                // is uint16_t (max 65535), but it's kept for future-proofing. If the
+                // protocol changes to uint32_t, this check becomes meaningful.
+                // Modern compilers optimize away the always-false branch anyway.
                 if (resp.respLen < MIN_MSG_LEN || resp.respLen > MAX_MSG_LEN) {
                     LOG_ERR("[MsgClient] Invalid msgLen: %u", resp.respLen);
                     stats_.parse_errors.fetch_add(1, std::memory_order_relaxed);
@@ -439,7 +507,7 @@ void MsgClient::ioLoop() {
 
             if (parse_error) {
                 // Reset buffer on protocol error
-                recv_buf = pool_->allocate(RECV_BUFFER_SIZE);
+                recv_buf = pool_->allocate(getRecvBufferSize());
                 if (!recv_buf) {
                     LOG_ERR("[MsgClient] Failed to allocate receive buffer - memory pool exhausted");
                     break;
@@ -453,7 +521,7 @@ void MsgClient::ioLoop() {
             if (remaining > 0) {
                 // Allocate a new buffer and copy the partial data
                 // (can't memmove in-place because existing RawMessages reference this buffer)
-                auto new_buf = pool_->allocate(RECV_BUFFER_SIZE);
+                auto new_buf = pool_->allocate(getRecvBufferSize());
                 if (!new_buf) {
                     LOG_ERR("[MsgClient] Failed to allocate buffer for partial data - memory pool exhausted");
                     break;
@@ -463,7 +531,7 @@ void MsgClient::ioLoop() {
                 recv_used = remaining;
             } else {
                 // All data consumed — fresh buffer for next recv
-                recv_buf = pool_->allocate(RECV_BUFFER_SIZE);
+                recv_buf = pool_->allocate(getRecvBufferSize());
                 if (!recv_buf) {
                     LOG_ERR("[MsgClient] Failed to allocate fresh receive buffer - memory pool exhausted");
                     break;
@@ -472,15 +540,19 @@ void MsgClient::ioLoop() {
             }
         }
 
-        // Disconnected — clean up and retry
+        // Disconnected — clean up and retry with exponential backoff
         closeSocket();
 
         if (running_.load(std::memory_order_relaxed)) {
             LOG_INFO("[MsgClient] Disconnected, reconnecting in %d ms...",
-                    config_.reconnect_interval_ms);
+                    current_reconnect_delay_ms_);
             std::this_thread::sleep_for(
-                std::chrono::milliseconds(config_.reconnect_interval_ms));
+                std::chrono::milliseconds(current_reconnect_delay_ms_));
             stats_.reconnect_count.fetch_add(1, std::memory_order_relaxed);
+            // Exponential backoff
+            current_reconnect_delay_ms_ = std::min(
+                static_cast<int>(current_reconnect_delay_ms_ * Defaults::RECONNECT_BACKOFF_MULT),
+                Defaults::RECONNECT_MAX_MS);
         }
     }
 }

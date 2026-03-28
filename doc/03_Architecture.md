@@ -38,7 +38,10 @@ void ioLoop() {
                 raw.offset = message_start;
                 raw.length = message_length;
                 
-                raw_queue_->push_wait(std::move(raw));  // Pass to decoder
+                // Push with timeout - drops message if queue is full
+                if (!raw_queue_->push_wait(std::move(raw), timeout_ms)) {
+                    stats_.messages_dropped++;  // Queue full, message dropped
+                }
             }
         }
     }
@@ -47,6 +50,13 @@ void ioLoop() {
 
 **Key concept: Zero-copy**
 Instead of copying message data, we share a reference to the buffer using `shared_ptr`. Multiple messages can reference different parts of the same buffer.
+
+**Drop Strategy vs Backpressure**
+When queues are full, this system uses a **drop strategy** rather than backpressure:
+- **Backpressure** would stop receiving, causing TCP buffers to fill up
+- **Drop strategy** discards messages when queues are full
+- This protects the server from slow clients that could cause memory exhaustion
+- Appropriate for real-time data where freshness matters more than completeness
 
 ## Stage 2: Decoder Thread (Raw Queue → Decoded Queues)
 
@@ -121,6 +131,38 @@ client.setMessageHandler([](const SubMessage &msg, size_t worker_index) {
 ## The Lock-Free Queue
 
 This is the secret sauce for high performance.
+
+### Connection Health Check
+
+Beyond TCP keepalive, the client can optionally monitor connection health via an **idle timeout**:
+
+```cpp
+// If no data received for N seconds, force reconnect
+if (CONN_IDLE_TIMEOUT_MS > 0 && idle_time > CONN_IDLE_TIMEOUT_MS) {
+    forceReconnect();
+}
+```
+
+**Why this might be needed:**
+- TCP keepalive can take minutes to detect dead connections (OS-dependent)
+- Application-level timeout is faster and configurable
+- Protects against "zombie connections" where TCP thinks it's alive but no data flows
+
+**Default: Disabled (0)** - This accommodates busy/quiet periods during the day. To enable, modify `CONN_IDLE_TIMEOUT_MS` in `msg_client.h` (e.g., set to 60000 for 60-second timeout).
+
+### Progressive Backoff Strategy
+
+When a queue operation can't complete immediately, the queue uses progressive backoff instead of busy-waiting:
+
+```
+Spin iterations:  0-100     →  yield()
+                 100-200    →  sleep 1μs
+                 200-300    →  sleep 10μs
+                 300-400    →  sleep 100μs
+                 400+       →  sleep 1ms
+```
+
+This provides a balance between low latency (for short waits) and CPU efficiency (for longer waits).
 
 ### Why Lock-Free?
 
@@ -233,6 +275,59 @@ std::shared_ptr<Buffer> allocate(size_t size) {
 // NOT freed to the OS - ready for reuse!
 ```
 
+## RAII Resource Management
+
+### SocketGuard
+
+A RAII wrapper ensures sockets are always closed properly, even on exceptions:
+
+```cpp
+class SocketGuard {
+    int fd_;
+public:
+    explicit SocketGuard(int fd) : fd_(fd) {}
+    ~SocketGuard() { 
+        if (fd_ >= 0) {
+            ::shutdown(fd_, SHUT_RDWR);
+            ::close(fd_);
+        }
+    }
+    // Movable but not copyable
+    SocketGuard(SocketGuard&& other) noexcept : fd_(other.release()) {}
+    SocketGuard(const SocketGuard&) = delete;
+};
+```
+
+Benefits:
+- No resource leaks, even if exceptions occur
+- Automatic cleanup when guard goes out of scope
+- Move semantics allow ownership transfer
+
+### Thread Lifecycle Management
+
+Threads use a **two-phase shutdown** strategy for safety:
+
+```
+Phase 1: Graceful (0-30s)
+  ├── Set running_=false
+  ├── Close socket (unblocks IO thread)
+  └── Wait for threads to exit naturally
+
+Phase 2: Force Cancel (if needed, Linux only)
+  ├── pthread_cancel() to request termination
+  ├── Wait up to 2s for thread to stop
+  └── Thread stops at next cancellation point
+```
+
+**Why not detach?** Detached threads that access member variables after destruction cause **use-after-free crashes**.
+
+**Cancellation Points:** Threads stop at blocking operations (poll, recv, sleep) or when checking `running_`. This is safe because:
+- IO thread: blocks on `poll()`/`recv()` - cancellation point
+- Decoder: blocks on `pop_wait()` - uses sleep (cancellation point)
+- Workers: blocks on `pop_wait()` - uses sleep (cancellation point)
+
+On non-Linux platforms, cancellation is not available, so we wait longer (60s) as a last resort.
+
 ## Thread Safety Without Locks
 
 | Component | Thread Safety | Mechanism |
@@ -241,6 +336,22 @@ std::shared_ptr<Buffer> allocate(size_t size) {
 | `decoded_queues_[i]` | Decoder (producer) + Worker i (consumer) | Lock-free SPSC queue |
 | `stats_` | All threads read/write | Atomic variables |
 | `pool_` | All threads allocate | Mutex per size class (acceptable contention) |
+
+### Statistics Counter Overflow
+
+All counters are `uint64_t` (max: 18,446,744,073,709,551,615).
+
+**Overflow behavior:** Counters wrap around to 0 (standard unsigned integer overflow).
+
+**Practical impact:** None for realistic workloads.
+- At 10 million messages/second, `messages_received` would take **~58,000 years** to overflow
+- For very high rates, monitor for large negative deltas in statistics reporting
+
+**Handling overflow in delta calculations:**
+```cpp
+// Safe delta calculation (handles overflow correctly)
+uint64_t delta = current - previous;  // Unsigned arithmetic wraps correctly
+```
 
 ## Data Flow Summary
 

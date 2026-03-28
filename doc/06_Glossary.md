@@ -10,6 +10,12 @@ Memory ordering constraints that ensure writes in one thread are visible to read
 
 ## B
 
+**Backoff**
+A technique where a waiting thread progressively increases its waiting time (yield → short sleep → longer sleep) to balance latency and CPU usage.
+
+**Backpressure**
+A flow control mechanism where a slow consumer causes the producer to slow down or stop. Not used here to protect server resources.
+
 **Buffer**
 A region of memory used to temporarily hold data while it's being moved from one place to another. In networking, buffers hold received data until processed.
 
@@ -35,10 +41,19 @@ When two or more threads are waiting for each other to release resources, causin
 **Decoder Thread**
 In this program, the thread that parses raw network bytes into structured messages.
 
+**Defensive Programming**
+Writing code that anticipates future changes and potential errors. Example: validating an upper bound that is currently impossible to exceed, so the check becomes active if the data type changes in the future.
+
+**Drop Strategy**
+A message handling policy where messages are discarded when queues are full, rather than blocking. Protects servers from slow clients.
+
 ## E
 
 **Endianness**
 The order bytes are stored in memory. Little-endian (x86): least significant byte first. Big-endian (network): most significant byte first.
+
+**Exponential Backoff**
+A retry strategy where the delay between attempts increases exponentially (e.g., 1s, 2s, 4s, 8s...). Prevents overwhelming a struggling server with repeated connection attempts.
 
 ## F
 
@@ -51,6 +66,9 @@ When two threads modify different variables that happen to be on the same cache 
 A function or callback that processes an event or message. In this program, the user-provided function that processes decoded messages.
 
 ## I
+
+**Idle Timeout**
+A time limit for detecting inactive connections. If no data is received within this time, the connection is considered dead and reconnection is triggered. Complements TCP keepalive with faster, application-level detection.
 
 **IO Thread**
 Input/Output thread. In this program, the thread that receives data from the network socket.
@@ -132,6 +150,12 @@ A scheduling algorithm that cycles through items equally. Used here to distribut
 **Sequence Number**
 A monotonically increasing number assigned to each message. Used for ordering and gap detection.
 
+**Size Class**
+Memory pool concept: grouping allocations by size. This pool has 8 size classes from 64B to 256KB. Each class has configurable initial count, max free list size, and max total allocations.
+
+**Spinlock**
+A simple lock that uses busy-waiting (repeatedly checking) until the lock becomes available. Faster than mutexes for very short critical sections.
+
 **Shared Pointer**
 `std::shared_ptr` - a smart pointer that allows multiple owners of an object. Object deleted when last owner releases it.
 
@@ -154,6 +178,15 @@ Casts an object to an r-value reference, enabling move semantics instead of copy
 
 **TCP (Transmission Control Protocol)**
 Reliable, ordered, connection-oriented network protocol. Used here for the client-server communication.
+
+**TCP Keepalive**
+A mechanism that sends periodic probe packets to detect dead connections. Configurable via TCP_KEEPIDLE, TCP_KEEPINTVL, and TCP_KEEPCNT environment variables.
+
+**Thread Cancellation**
+A mechanism to forcefully request a thread to stop (Linux: `pthread_cancel`). The thread stops at the next "cancellation point" (blocking I/O, sleep, etc.). Used as a last resort during shutdown when graceful exit fails.
+
+**Two-Phase Shutdown**
+A shutdown strategy that first attempts graceful thread termination, then escalates to force cancellation if needed. Prevents both indefinite hangs and unsafe thread detachment.
 
 **Thread**
 A separate execution path within a process. This program uses multiple threads for parallelism.

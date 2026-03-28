@@ -66,27 +66,86 @@ Options:
 - `--port`: Server port (default: 8888)
 - `--item`: Item to subscribe to (default: "default")
 - `--seq`: Starting sequence number (default: 0)
-- `--workers`: Number of worker threads (default: 2)
-- `--raw-queue`: Size of raw queue (default: 8192)
-- `--dec-queue`: Size of decoded queue per worker (default: 8192)
-- `--reconnect`: Reconnect interval in ms (default: 3000)
+- `--workers`: Number of worker threads (default: 2, range: 1-64)
+- `--raw-queue`: Size of raw queue (default: 8192, range: 64-1048576)
+- `--dec-queue`: Size of decoded queue per worker (default: 8192, range: 64-1048576)
+- `--reconnect`: Reconnect interval in ms (default: 3000, range: 100-300000)
+- `--queue-timeout`: Queue push timeout in ms (default: 5, -1=no wait, 0=wait forever)
 - `--stats-interval`: Statistics print interval in seconds (default: 5)
 - `--log-dir`: Directory for log files (default: ./log)
+- `--log-stdout`: STDOUT log level (default: 6/INFO, 0-7)
+- `--log-file`: File log level (default: 7/DEBUG, 0-7)
+- `--log-syslog`: Syslog log level (default: 5/NOTICE, 0-7)
 
 ### Using Environment Variables
 
 All options can also be set via environment variables:
 
+**Client connection settings:**
 ```bash
 export APP_TCP_CLIENT_HOST="192.168.1.100"
 export APP_TCP_CLIENT_PORT="9999"
 export APP_TCP_CLIENT_ITEM="mydata"
+export APP_TCP_CLIENT_SEQ="0"
 export APP_TCP_CLIENT_WORKERS="4"
-
-./msg_client  # Uses environment settings
+export APP_TCP_CLIENT_RAW_QUEUE="8192"
+export APP_TCP_CLIENT_DEC_QUEUE="8192"
+export APP_TCP_CLIENT_RECONNECT="3000"
+export APP_TCP_CLIENT_QUEUE_TIMEOUT="5"
+export APP_TCP_CLIENT_STATS_INTERVAL="5"
 ```
 
+**Logging settings:**
+```bash
+export APP_LOG_DIR="./log"
+export APP_LOG_STDOUT="6"   # 0-7, default: 6 (INFO)
+export APP_LOG_FILE="7"     # 0-7, default: 7 (DEBUG)
+export APP_LOG_SYSLOG="5"   # 0-7, default: 5 (NOTICE)
+```
+
+**Server settings (for test server):**
+```bash
+export APP_TCP_SERVER_PORT="8888"
+export APP_TCP_SERVER_MSG_SIZE="256"
+export APP_TCP_SERVER_MSG_RATE="1000"
+export APP_TCP_SERVER_MSG_COUNT="0"
+```
+
+**TCP Keepalive settings (Linux only):**
+```bash
+export TCP_KEEPIDLE="10"    # Seconds before starting keepalive probes
+export TCP_KEEPINTVL="3"    # Seconds between keepalive probes
+export TCP_KEEPCNT="3"      # Number of keepalive probes before giving up
+```
+
+**Protocol customization (testing/advanced):**
+```bash
+export APP_TCP_MAGIC_KEY="0xDEADBEEF"    # Override protocol magic key
+export APP_TCP_RECV_BUFFER_SIZE="131072" # Override receive buffer size (bytes)
+```
+
+### Reconnection Behavior
+
+The client uses **exponential backoff** for reconnection attempts:
+- Initial delay: `--reconnect` value (default: 3000ms)
+- Backoff multiplier: 2x each failure
+- Maximum delay: 60 seconds
+- Resets to initial delay on successful connection
+
+Example sequence: 3s → 6s → 12s → 24s → 48s → 60s (cap) → 60s...
+
 Environment variables take precedence over defaults but command-line arguments override environment variables.
+
+### Log Levels
+
+| Level | Value | Description |
+|-------|-------|-------------|
+| CRITICAL | 2 | System critical errors |
+| ERROR | 3 | Error conditions |
+| WARNING | 4 | Warning conditions |
+| NOTICE | 5 | Normal but significant |
+| INFO | 6 | Informational messages |
+| DEBUG | 7 | Debug-level messages |
 
 ## Example Scenarios
 
@@ -128,16 +187,16 @@ Environment variables take precedence over defaults but command-line arguments o
 
 ```
 [Stats] recv=5000(+1000) decoded=5000 proc=5000(+
-1000) bytes=1280000(2.05 Mbps) reconnects=0 parse_err=0 q_full=0
+1000) dropped=0 bytes=1280000(2.05 Mbps) reconnects=0 parse_err=0
 ```
 
 - `recv`: Total messages received (+ since last report)
 - `decoded`: Total messages successfully parsed
 - `proc`: Total messages processed by workers
-- `bytes`: Total bytes received (+ throughput)
+- `dropped`: Messages dropped due to full queues
+- `bytes`: Total bytes received (+ throughput in Mbps)
 - `reconnects`: Number of reconnections
 - `parse_err`: Protocol parse errors
-- `q_full`: Times queue was full (message dropped)
 
 ### Server Statistics
 

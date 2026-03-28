@@ -15,7 +15,7 @@ Welcome! This documentation is designed for developers who haven't used C++ in a
 | [01_Overview.md](01_Overview.md) | What the program does, key features, basic flow |
 | [02_Modern_CPP_Guide.md](02_Modern_CPP_Guide.md) | Modern C++ features (auto, lambdas, smart pointers, move semantics, atomics) |
 | [03_Architecture.md](03_Architecture.md) | Three-stage pipeline, lock-free queues, memory pool, zero-copy |
-| [04_Protocol.md](04_Wire_Protocol.md) | Binary protocol format, sequence numbers, wire format |
+| [04_Protocol.md](04_Protocol.md) | Binary protocol format, sequence numbers, wire format |
 | [05_Build_and_Run.md](05_Build_and_Run.md) | Build instructions, running, troubleshooting, performance tuning |
 | [06_Glossary.md](06_Glossary.md) | Terms and definitions |
 

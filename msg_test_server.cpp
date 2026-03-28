@@ -198,8 +198,8 @@ int main(int argc, char *argv[]) {
       continue;
     }
 
-    if (req.reqKey != MAGIC_KEY) {
-      LOG_ERR("Invalid magic key: 0x%X (expected 0x%X)", req.reqKey, MAGIC_KEY);
+    if (req.reqKey != getMagicKey()) {
+      LOG_ERR("Invalid magic key: 0x%X (expected 0x%X)", req.reqKey, getMagicKey());
       ::close(client_fd);
       continue;
     }
