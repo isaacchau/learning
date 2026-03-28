@@ -30,9 +30,10 @@ struct Buffer {
 
 // Configuration for a single size class in the memory pool.
 struct SizeClassConfig {
-  size_t block_size;    // data capacity (e.g. 64, 256, 1024, ...)
-  size_t initial_count; // pre-allocated at construction
-  size_t max_count;     // max blocks kept in free list
+  size_t block_size;         // data capacity (e.g. 64, 256, 1024, ...)
+  size_t initial_count;      // pre-allocated at construction
+  size_t max_count;          // max blocks kept in free list
+  size_t max_total_allocated;// max total allocations (0 = unlimited)
 };
 
 // Size-class memory pool.
@@ -43,10 +44,12 @@ public:
   static const size_t NUM_SIZE_CLASSES = 8;
 
   // Default size classes: 64B, 256B, 1KB, 4KB, 16KB, 64KB, 128KB, 256KB
+  // Format: {block_size, initial_count, max_free_list, max_total_allocated}
   static std::vector<SizeClassConfig> defaultConfig() {
-    return {{64, 64, 512},     {256, 64, 512},    {1024, 64, 512},
-            {4096, 128, 512},  {16384, 128, 256}, {65536, 128, 256},
-            {131072, 64, 128}, {262144, 32, 64}};
+    return {{64, 64, 512, 1024},      {256, 64, 512, 1024},
+            {1024, 64, 512, 1024},    {4096, 128, 512, 2048},
+            {16384, 128, 256, 1024},  {65536, 128, 256, 1024},
+            {131072, 64, 128, 512},   {262144, 32, 64, 256}};
   }
 
   explicit MemoryPool(
@@ -58,11 +61,13 @@ public:
     for (size_t i = 0; i < NUM_SIZE_CLASSES; ++i) {
       classes_[i].block_size = config[i].block_size;
       classes_[i].max_count = config[i].max_count;
+      classes_[i].max_total_allocated = config[i].max_total_allocated;
       // Pre-allocate initial buffers
       classes_[i].free_list.reserve(config[i].max_count);
       for (size_t j = 0; j < config[i].initial_count; ++j) {
         classes_[i].free_list.push_back(Buffer::create(config[i].block_size));
         classes_[i].total_allocated.fetch_add(1, std::memory_order_relaxed);
+        classes_[i].current_allocated.fetch_add(1, std::memory_order_relaxed);
       }
     }
   }
@@ -82,6 +87,7 @@ public:
 
   // Allocate a buffer with at least `requested_size` bytes of data capacity.
   // Returns shared_ptr with custom deleter that returns buffer to pool.
+  // Returns empty shared_ptr if allocation limit reached.
   std::shared_ptr<Buffer> allocate(size_t requested_size) {
     size_t cls = findSizeClass(requested_size);
     Buffer *buf = nullptr;
@@ -95,12 +101,21 @@ public:
     }
 
     if (!buf) {
+      // Check if we've hit the allocation limit
+      size_t current = classes_[cls].current_allocated.load(std::memory_order_relaxed);
+      size_t max = classes_[cls].max_total_allocated;
+      if (max > 0 && current >= max) {
+        // Allocation limit reached
+        return std::shared_ptr<Buffer>();
+      }
+      
       buf = Buffer::create(classes_[cls].block_size);
       classes_[cls].total_allocated.fetch_add(1, std::memory_order_relaxed);
+      classes_[cls].current_allocated.fetch_add(1, std::memory_order_relaxed);
       classes_[cls].pool_misses.fetch_add(1, std::memory_order_relaxed);
     }
 
-    // Custom deleter returns buffer to pool
+    // Custom deleter returns buffer to pool (or destroys if pool is full)
     return std::shared_ptr<Buffer>(
         buf, [this, cls](Buffer *b) { this->returnBuffer(b, cls); });
   }
@@ -108,8 +123,10 @@ public:
   // Statistics snapshot
   struct Stats {
     size_t block_size;
+    size_t max_total_allocated;
     uint64_t total_allocated;
     uint64_t total_returned;
+    uint64_t current_allocated;
     uint64_t pool_misses;
     size_t free_count;
   };
@@ -120,10 +137,13 @@ public:
     for (size_t i = 0; i < NUM_SIZE_CLASSES; ++i) {
       Stats s;
       s.block_size = classes_[i].block_size;
+      s.max_total_allocated = classes_[i].max_total_allocated;
       s.total_allocated =
           classes_[i].total_allocated.load(std::memory_order_relaxed);
       s.total_returned =
           classes_[i].total_returned.load(std::memory_order_relaxed);
+      s.current_allocated =
+          classes_[i].current_allocated.load(std::memory_order_relaxed);
       s.pool_misses = classes_[i].pool_misses.load(std::memory_order_relaxed);
       {
         std::lock_guard<std::mutex> lock(classes_[i].mutex);
@@ -138,11 +158,13 @@ private:
   struct SizeClass {
     size_t block_size = 0;
     size_t max_count = 0;
+    size_t max_total_allocated = 0;      // 0 = unlimited
     std::vector<Buffer *> free_list;
     mutable std::mutex mutex;
     std::atomic<uint64_t> total_allocated{0};
     std::atomic<uint64_t> total_returned{0};
     std::atomic<uint64_t> pool_misses{0};
+    std::atomic<uint64_t> current_allocated{0};  // Currently in use
   };
 
   SizeClass classes_[NUM_SIZE_CLASSES];
@@ -161,6 +183,7 @@ private:
   // Return buffer to pool (called by shared_ptr custom deleter)
   void returnBuffer(Buffer *buf, size_t class_idx) {
     classes_[class_idx].total_returned.fetch_add(1, std::memory_order_relaxed);
+    classes_[class_idx].current_allocated.fetch_sub(1, std::memory_order_relaxed);
 
     std::lock_guard<std::mutex> lock(classes_[class_idx].mutex);
     if (classes_[class_idx].free_list.size() < classes_[class_idx].max_count) {

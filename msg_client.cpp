@@ -261,6 +261,10 @@ void MsgClient::ioLoop() {
 
         // Allocate initial receive buffer from pool
         auto recv_buf = pool_->allocate(RECV_BUFFER_SIZE);
+        if (!recv_buf) {
+            LOG_ERR("[MsgClient] Failed to allocate receive buffer - memory pool exhausted");
+            break;
+        }
         size_t recv_used = 0;
 
         // Receive loop
@@ -291,6 +295,10 @@ void MsgClient::ioLoop() {
                 LOG_WARN("[MsgClient] Recv buffer full, no complete message");
                 stats_.parse_errors.fetch_add(1, std::memory_order_relaxed);
                 recv_buf = pool_->allocate(RECV_BUFFER_SIZE);
+                if (!recv_buf) {
+                    LOG_ERR("[MsgClient] Failed to allocate receive buffer - memory pool exhausted");
+                    break;
+                }
                 recv_used = 0;
                 continue;
             }
@@ -349,6 +357,10 @@ void MsgClient::ioLoop() {
             if (parse_error) {
                 // Reset buffer on protocol error
                 recv_buf = pool_->allocate(RECV_BUFFER_SIZE);
+                if (!recv_buf) {
+                    LOG_ERR("[MsgClient] Failed to allocate receive buffer - memory pool exhausted");
+                    break;
+                }
                 recv_used = 0;
                 continue;
             }
@@ -359,12 +371,20 @@ void MsgClient::ioLoop() {
                 // Allocate a new buffer and copy the partial data
                 // (can't memmove in-place because existing RawMessages reference this buffer)
                 auto new_buf = pool_->allocate(RECV_BUFFER_SIZE);
+                if (!new_buf) {
+                    LOG_ERR("[MsgClient] Failed to allocate buffer for partial data - memory pool exhausted");
+                    break;
+                }
                 std::memcpy(new_buf->data, recv_buf->data + parse_pos, remaining);
                 recv_buf = std::move(new_buf);
                 recv_used = remaining;
             } else {
                 // All data consumed — fresh buffer for next recv
                 recv_buf = pool_->allocate(RECV_BUFFER_SIZE);
+                if (!recv_buf) {
+                    LOG_ERR("[MsgClient] Failed to allocate fresh receive buffer - memory pool exhausted");
+                    break;
+                }
                 recv_used = 0;
             }
         }
