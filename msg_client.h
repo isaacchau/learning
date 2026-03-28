@@ -79,6 +79,29 @@ private:
 };
 
 // ============================================================================
+// Thread Join with Timeout Helper
+// ============================================================================
+
+#include <chrono>
+#include <future>
+
+// Join a thread with timeout (milliseconds)
+// Returns true if thread joined successfully, false if timeout
+inline bool joinWithTimeout(std::thread& t, int timeout_ms) {
+    if (!t.joinable()) return true;
+    
+    // Use async to wait with timeout
+    auto future = std::async(std::launch::async, [&t]() {
+        t.join();
+    });
+    
+    if (future.wait_for(std::chrono::milliseconds(timeout_ms)) == std::future_status::timeout) {
+        return false;  // Timeout - thread did not join
+    }
+    return true;
+}
+
+// ============================================================================
 // Configuration
 // ============================================================================
 

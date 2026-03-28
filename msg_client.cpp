@@ -87,13 +87,41 @@ void MsgClient::stop() {
     // Close socket to unblock any blocking recv/poll
     closeSocket();
 
-    // Join threads in reverse order: IO → decoder → workers
-    if (io_thread_.joinable()) io_thread_.join();
-    if (decoder_thread_.joinable()) decoder_thread_.join();
+    // Join threads with timeout (5 seconds each)
+    const int JOIN_TIMEOUT_MS = 5000;
+    bool io_joined = true, decoder_joined = true;
+    
+    if (io_thread_.joinable()) {
+        io_joined = joinWithTimeout(io_thread_, JOIN_TIMEOUT_MS);
+        if (!io_joined) {
+            LOG_ERR("[MsgClient] IO thread did not stop within %d ms", JOIN_TIMEOUT_MS);
+            // Forcefully detach to prevent crash on destruction
+            io_thread_.detach();
+        }
+    }
+    
+    if (decoder_thread_.joinable()) {
+        decoder_joined = joinWithTimeout(decoder_thread_, JOIN_TIMEOUT_MS);
+        if (!decoder_joined) {
+            LOG_ERR("[MsgClient] Decoder thread did not stop within %d ms", JOIN_TIMEOUT_MS);
+            decoder_thread_.detach();
+        }
+    }
+    
     for (auto& t : worker_threads_) {
-        if (t.joinable()) t.join();
+        if (t.joinable()) {
+            if (!joinWithTimeout(t, JOIN_TIMEOUT_MS)) {
+                LOG_ERR("[MsgClient] Worker thread did not stop within %d ms", JOIN_TIMEOUT_MS);
+                t.detach();
+            }
+        }
     }
     worker_threads_.clear();
+    
+    // Log summary if any threads timed out
+    if (!io_joined || !decoder_joined) {
+        LOG_WARN("[MsgClient] Some threads required forceful detach during shutdown");
+    }
 }
 
 StatsSnapshot MsgClient::getStats() const {
