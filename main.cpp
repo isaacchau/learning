@@ -106,23 +106,69 @@ int main(int argc, char *argv[]) {
     if ((strcmp(argv[i], "--host") == 0) && i + 1 < argc) {
       config.host = argv[++i];
     } else if ((strcmp(argv[i], "--port") == 0) && i + 1 < argc) {
-      config.port = static_cast<uint16_t>(std::stoi(argv[++i]));
+      try {
+        int port = std::stoi(argv[++i]);
+        if (port < Defaults::MIN_PORT || port > Defaults::MAX_PORT) {
+          fprintf(stderr, "Error: Port must be between %d and %d\n", 
+                  Defaults::MIN_PORT, Defaults::MAX_PORT);
+          return 1;
+        }
+        config.port = static_cast<uint16_t>(port);
+      } catch (...) {
+        fprintf(stderr, "Error: Invalid port number: %s\n", argv[i]);
+        return 1;
+      }
     } else if ((strcmp(argv[i], "--item") == 0) && i + 1 < argc) {
       config.item_name = argv[++i];
     } else if ((strcmp(argv[i], "--seq") == 0) && i + 1 < argc) {
-      config.starting_seq_num = std::stoull(argv[++i]);
+      try {
+        config.starting_seq_num = std::stoull(argv[++i]);
+      } catch (...) {
+        fprintf(stderr, "Error: Invalid sequence number: %s\n", argv[i]);
+        return 1;
+      }
     } else if ((strcmp(argv[i], "--workers") == 0) && i + 1 < argc) {
-      config.worker_thread_count = static_cast<size_t>(std::stoi(argv[++i]));
+      try {
+        config.worker_thread_count = static_cast<size_t>(std::stoi(argv[++i]));
+      } catch (...) {
+        fprintf(stderr, "Error: Invalid worker count: %s\n", argv[i]);
+        return 1;
+      }
     } else if ((strcmp(argv[i], "--raw-queue") == 0) && i + 1 < argc) {
-      config.raw_queue_size = static_cast<size_t>(std::stoi(argv[++i]));
+      try {
+        config.raw_queue_size = static_cast<size_t>(std::stoi(argv[++i]));
+      } catch (...) {
+        fprintf(stderr, "Error: Invalid queue size: %s\n", argv[i]);
+        return 1;
+      }
     } else if ((strcmp(argv[i], "--dec-queue") == 0) && i + 1 < argc) {
-      config.decoded_queue_size = static_cast<size_t>(std::stoi(argv[++i]));
+      try {
+        config.decoded_queue_size = static_cast<size_t>(std::stoi(argv[++i]));
+      } catch (...) {
+        fprintf(stderr, "Error: Invalid queue size: %s\n", argv[i]);
+        return 1;
+      }
     } else if ((strcmp(argv[i], "--reconnect") == 0) && i + 1 < argc) {
-      config.reconnect_interval_ms = std::stoi(argv[++i]);
+      try {
+        config.reconnect_interval_ms = std::stoi(argv[++i]);
+      } catch (...) {
+        fprintf(stderr, "Error: Invalid reconnect interval: %s\n", argv[i]);
+        return 1;
+      }
     } else if ((strcmp(argv[i], "--queue-timeout") == 0) && i + 1 < argc) {
-      config.queue_push_timeout_ms = std::stoi(argv[++i]);
+      try {
+        config.queue_push_timeout_ms = std::stoi(argv[++i]);
+      } catch (...) {
+        fprintf(stderr, "Error: Invalid queue timeout: %s\n", argv[i]);
+        return 1;
+      }
     } else if ((strcmp(argv[i], "--stats-interval") == 0) && i + 1 < argc) {
-      stats_interval_sec = std::stoi(argv[++i]);
+      try {
+        stats_interval_sec = std::stoi(argv[++i]);
+      } catch (...) {
+        fprintf(stderr, "Error: Invalid stats interval: %s\n", argv[i]);
+        return 1;
+      }
     } else if ((strcmp(argv[i], "--log-dir") == 0) && i + 1 < argc) {
       log_dir = argv[++i];
     } else if ((strcmp(argv[i], "--log-stdout") == 0) && i + 1 < argc) {
@@ -139,6 +185,13 @@ int main(int argc, char *argv[]) {
       printUsage(argv[0]);
       return 1;
     }
+  }
+
+  // Validate configuration
+  std::string validation_error = config.validate();
+  if (!validation_error.empty()) {
+    fprintf(stderr, "Configuration error: %s\n", validation_error.c_str());
+    return 1;
   }
 
   // Initialize high-performance logger

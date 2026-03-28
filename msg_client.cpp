@@ -22,6 +22,73 @@
 #include <chrono>
 
 // ============================================================================
+// Configuration Validation
+// ============================================================================
+
+std::string MsgClientConfig::validate() const {
+    // Host validation
+    if (host.empty()) {
+        return "Host cannot be empty";
+    }
+    
+    // Port validation
+    if (port < Defaults::MIN_PORT || port > Defaults::MAX_PORT) {
+        return "Port must be between " + std::to_string(Defaults::MIN_PORT) + 
+               " and " + std::to_string(Defaults::MAX_PORT);
+    }
+    
+    // Item name validation (must fit in protocol's reqItem field)
+    if (item_name.empty()) {
+        return "Item name cannot be empty";
+    }
+    if (item_name.length() > Defaults::MAX_ITEM_NAME_LEN) {
+        return "Item name too long (max " + std::to_string(Defaults::MAX_ITEM_NAME_LEN) + 
+               " chars, got " + std::to_string(item_name.length()) + ")";
+    }
+    
+    // Worker thread count validation
+    if (worker_thread_count < Defaults::MIN_WORKER_THREADS || 
+        worker_thread_count > Defaults::MAX_WORKER_THREADS) {
+        return "Worker thread count must be between " + 
+               std::to_string(Defaults::MIN_WORKER_THREADS) + " and " + 
+               std::to_string(Defaults::MAX_WORKER_THREADS);
+    }
+    
+    // Queue size validation
+    if (raw_queue_size < Defaults::MIN_QUEUE_SIZE || 
+        raw_queue_size > Defaults::MAX_QUEUE_SIZE) {
+        return "Raw queue size must be between " + 
+               std::to_string(Defaults::MIN_QUEUE_SIZE) + " and " + 
+               std::to_string(Defaults::MAX_QUEUE_SIZE);
+    }
+    if (decoded_queue_size < Defaults::MIN_QUEUE_SIZE || 
+        decoded_queue_size > Defaults::MAX_QUEUE_SIZE) {
+        return "Decoded queue size must be between " + 
+               std::to_string(Defaults::MIN_QUEUE_SIZE) + " and " + 
+               std::to_string(Defaults::MAX_QUEUE_SIZE);
+    }
+    
+    // Reconnect interval validation
+    if (reconnect_interval_ms < Defaults::MIN_RECONNECT_MS || 
+        reconnect_interval_ms > Defaults::MAX_RECONNECT_MS) {
+        return "Reconnect interval must be between " + 
+               std::to_string(Defaults::MIN_RECONNECT_MS) + " and " + 
+               std::to_string(Defaults::MAX_RECONNECT_MS) + " ms";
+    }
+    
+    // Queue push timeout validation (-1 is valid for no-wait)
+    if (queue_push_timeout_ms < Defaults::MIN_QUEUE_PUSH_TIMEOUT_MS || 
+        queue_push_timeout_ms > Defaults::MAX_QUEUE_PUSH_TIMEOUT_MS) {
+        return "Queue push timeout must be between " + 
+               std::to_string(Defaults::MIN_QUEUE_PUSH_TIMEOUT_MS) + " and " + 
+               std::to_string(Defaults::MAX_QUEUE_PUSH_TIMEOUT_MS) + " ms";
+    }
+    
+    // All validations passed
+    return "";
+}
+
+// ============================================================================
 // Construction / Destruction
 // ============================================================================
 

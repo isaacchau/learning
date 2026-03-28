@@ -147,6 +147,21 @@ namespace Defaults {
     // - 1:1 client-server relationship, OR
     // - Server has per-client isolation and circuit breakers
     constexpr int           QUEUE_PUSH_TIMEOUT_MS = 5;
+    constexpr int           MIN_QUEUE_PUSH_TIMEOUT_MS = -1;  // -1 = no wait
+    constexpr int           MAX_QUEUE_PUSH_TIMEOUT_MS = 60000; // 60 seconds max
+    
+    // Queue size limits
+    constexpr size_t        MIN_QUEUE_SIZE       = 64;
+    constexpr size_t        MAX_QUEUE_SIZE       = 1048576;  // 1M entries
+    
+    // Network limits
+    constexpr uint16_t      MIN_PORT             = 1;
+    constexpr uint16_t      MAX_PORT             = 65535;
+    constexpr int           MIN_RECONNECT_MS     = 100;
+    constexpr int           MAX_RECONNECT_MS     = 300000;  // 5 minutes
+    
+    // Protocol limits (from protocol.h)
+    constexpr size_t        MAX_ITEM_NAME_LEN    = 32;
 }
 
 // ============================================================================
@@ -173,6 +188,10 @@ struct MsgClientConfig {
     int    queue_push_timeout_ms        = Defaults::QUEUE_PUSH_TIMEOUT_MS;
 
     std::vector<SizeClassConfig> pool_config; // Empty = use defaults
+    
+    // Validate configuration settings
+    // Returns empty string if valid, error message if invalid
+    std::string validate() const;
 };
 
 // ============================================================================
