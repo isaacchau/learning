@@ -97,6 +97,7 @@ MsgClient::MsgClient(const MsgClientConfig& config)
     , running_(false)
     , current_reconnect_delay_ms_(config.reconnect_interval_ms)
     , last_recv_time_(std::chrono::steady_clock::now())
+    , last_received_seq_(config.starting_seq_num)
 {
     // Clamp worker count
     if (config_.worker_thread_count < Defaults::MIN_WORKER_THREADS) {
@@ -334,8 +335,13 @@ bool MsgClient::sendSubscription() {
     std::memset(&req, 0, sizeof(req));
     req.reqKey = getMagicKey();
     snprintf(req.reqItem, sizeof(req.reqItem), "%s", config_.item_name.c_str());
-    req.lastRespSeq = config_.starting_seq_num;
+    // Use the last received sequence number for resume on reconnection
+    uint64_t resume_seq = last_received_seq_.load(std::memory_order_relaxed);
+    req.lastRespSeq = resume_seq;
     snprintf(req.clientID, sizeof(req.clientID), "MsgClient");
+    
+    LOG_INFO("[MsgClient] Sending subscription: item='%s', resume_from_seq=%lu",
+             config_.item_name.c_str(), resume_seq);
 
     ssize_t sent = ::send(socket_guard_.get(), &req, sizeof(req), MSG_NOSIGNAL);
     if (sent != sizeof(req)) {
@@ -494,6 +500,10 @@ void MsgClient::ioLoop() {
                 raw.offset  = parse_pos;
                 raw.length  = resp.respLen;
                 raw.seq_num = resp.respSeq;
+
+                // Track the highest sequence number received for reconnection resume
+                // (TCP guarantees in-order delivery, so this is the latest)
+                last_received_seq_.store(resp.respSeq, std::memory_order_relaxed);
 
                 if (!raw_queue_->push_wait(std::move(raw), config_.queue_push_timeout_ms)) {
                     stats_.queue_full_errors.fetch_add(1, std::memory_order_relaxed);

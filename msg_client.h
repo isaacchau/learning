@@ -336,6 +336,11 @@ private:
     // Connection state (IO thread only)
     int current_reconnect_delay_ms_;       // Current backoff delay, reset on success
     std::chrono::steady_clock::time_point last_recv_time_; // Last data received
+    
+    // Track last received sequence number for reconnection
+    // When reconnecting, we tell the server "I already have up to seq X",
+    // so the server resumes from X+1 instead of resending everything.
+    std::atomic<uint64_t> last_received_seq_;
 };
 
 #endif // MSG_CLIENT_H

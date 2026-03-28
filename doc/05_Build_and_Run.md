@@ -134,6 +134,20 @@ The client uses **exponential backoff** for reconnection attempts:
 
 Example sequence: 3s → 6s → 12s → 24s → 48s → 60s (cap) → 60s...
 
+### Sequence Number Resume
+
+When reconnecting, the client tells the server the **last received sequence number**, so the server can resume from where it left off instead of resending everything:
+
+```
+1. Client receives messages 1-1000
+2. Connection drops
+3. Client reconnects automatically
+4. Client sends: "I have up to seq 1000"
+5. Server resumes from seq 1001 (no duplicates!)
+```
+
+This is automatic - no action needed. The client tracks the highest sequence number received and uses it for all reconnection attempts.
+
 Environment variables take precedence over defaults but command-line arguments override environment variables.
 
 ### Log Levels
