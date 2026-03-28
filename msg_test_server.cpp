@@ -1,0 +1,292 @@
+// msg_test_server.cpp
+// Test server that generates configurable messages for the MsgClient.
+// Usage: ./msg_test_server [--port P] [--msg-size S] [--msg-rate R]
+// [--msg-count N]
+
+#include "log_msg.h"
+#include "protocol.h"
+
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <poll.h>
+#include <signal.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <thread>
+#include <vector>
+
+static std::atomic<bool> g_shutdown(false);
+
+static void signalHandler(int) {
+  g_shutdown.store(true, std::memory_order_release);
+}
+
+// Send all bytes, handling partial sends
+static bool sendAll(int fd, const void *data, size_t len) {
+  const char *p = static_cast<const char *>(data);
+  size_t sent = 0;
+  while (sent < len) {
+    ssize_t n = ::send(fd, p + sent, len - sent, MSG_NOSIGNAL);
+    if (n <= 0)
+      return false;
+    sent += static_cast<size_t>(n);
+  }
+  return true;
+}
+
+static void printUsage(const char *prog) {
+  fprintf(stderr,
+          "Usage: %s [options]\n"
+          "Options:\n"
+          "  --port <port>       Listen port      (default: 8888)\n"
+          "  --msg-size <bytes>  Body size         (default: 256)\n"
+          "  --msg-rate <msgs/s> Send rate, 0=max  (default: 1000)\n"
+          "  --msg-count <num>   Total to send, 0=inf (default: 0)\n"
+          "  -h, --help          Show this help\n",
+          prog);
+}
+
+int main(int argc, char *argv[]) {
+  // Environment parsing helpers
+  auto getEnvInt = [](const char *name, int def) -> int {
+    const char *val = std::getenv(name);
+    if (val) {
+      try { return std::stoi(val); } catch (...) {}
+    }
+    return def;
+  };
+  auto getEnvUll = [](const char *name, uint64_t def) -> uint64_t {
+    const char *val = std::getenv(name);
+    if (val) {
+      try { return std::stoull(val); } catch (...) {}
+    }
+    return def;
+  };
+
+  // Level 3 (Defaults) overridden by Level 2 (Environment Variables)
+  uint16_t port     = static_cast<uint16_t>(getEnvInt("APP_TCP_SERVER_PORT", 8888));
+  size_t   msg_size = static_cast<size_t>(getEnvInt("APP_TCP_SERVER_MSG_SIZE", 256));
+  int      msg_rate = getEnvInt("APP_TCP_SERVER_MSG_RATE", 1000);
+  uint64_t msg_count= getEnvUll("APP_TCP_SERVER_MSG_COUNT", 0);
+
+  for (int i = 1; i < argc; ++i) {
+    if ((strcmp(argv[i], "--port") == 0) && i + 1 < argc) {
+      port = static_cast<uint16_t>(std::stoi(argv[++i]));
+    } else if ((strcmp(argv[i], "--msg-size") == 0) && i + 1 < argc) {
+      msg_size = static_cast<size_t>(std::stoi(argv[++i]));
+    } else if ((strcmp(argv[i], "--msg-rate") == 0) && i + 1 < argc) {
+      msg_rate = std::stoi(argv[++i]);
+    } else if ((strcmp(argv[i], "--msg-count") == 0) && i + 1 < argc) {
+      msg_count = std::stoull(argv[++i]);
+    } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+      printUsage(argv[0]);
+      return 0;
+    } else {
+      fprintf(stderr, "Unknown option: %s\n", argv[i]);
+      printUsage(argv[0]);
+      return 1;
+    }
+  }
+
+  LogMsg::getInstance().init(argv[0], nullptr);
+
+  // Signal handling
+  struct sigaction sa;
+  std::memset(&sa, 0, sizeof(sa));
+  sa.sa_handler = signalHandler;
+  sigemptyset(&sa.sa_mask);
+  sigaction(SIGINT, &sa, nullptr);
+  sigaction(SIGTERM, &sa, nullptr);
+  signal(SIGPIPE, SIG_IGN);
+
+  // Create listening socket
+  int listen_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (listen_fd < 0) {
+    LOG_ERR("socket: %s", strerror(errno));
+    return 1;
+  }
+
+  int opt = 1;
+  ::setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+  struct sockaddr_in addr;
+  std::memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = INADDR_ANY;
+  addr.sin_port = htons(port);
+
+  if (::bind(listen_fd, reinterpret_cast<struct sockaddr *>(&addr),
+             sizeof(addr)) < 0) {
+    LOG_ERR("bind: %s", strerror(errno));
+    ::close(listen_fd);
+    return 1;
+  }
+
+  if (::listen(listen_fd, 1) < 0) {
+    LOG_ERR("listen: %s", strerror(errno));
+    ::close(listen_fd);
+    return 1;
+  }
+
+  // Calculate frame sizes
+  size_t total_msg_len = sizeof(TcpResponse) + sizeof(MsgHdr) + msg_size;
+  if (total_msg_len > MAX_MSG_LEN) {
+    LOG_ERR("Total message length %zu exceeds max %zu", total_msg_len,
+            MAX_MSG_LEN);
+    ::close(listen_fd);
+    return 1;
+  }
+
+  LOG_INFO("=== Test Server ===\n"
+           "  Port:       %u\n"
+           "  Body Size:  %zu bytes\n"
+           "  Frame Size: %zu bytes (TcpResponse=%zu + MsgHdr=%zu + body=%zu)\n"
+           "  Rate:       %d msgs/s%s\n"
+           "  Count:      %s\n"
+           "===================\n"
+           "Waiting for client connection...",
+           port, msg_size, total_msg_len, sizeof(TcpResponse), sizeof(MsgHdr),
+           msg_size, msg_rate, msg_rate == 0 ? " (max)" : "",
+           msg_count == 0 ? "infinite" : std::to_string(msg_count).c_str());
+
+  while (!g_shutdown.load(std::memory_order_relaxed)) {
+    // Wait for client with poll() so we can check g_shutdown
+    struct pollfd pfd = {};
+    pfd.fd = listen_fd;
+    pfd.events = POLLIN;
+    int ret = ::poll(&pfd, 1, 500);
+    if (ret <= 0)
+      continue;
+
+    struct sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
+    int client_fd =
+        ::accept(listen_fd, reinterpret_cast<struct sockaddr *>(&client_addr),
+                 &client_len);
+    if (client_fd < 0) {
+      if (errno == EINTR)
+        continue;
+      LOG_ERR("accept: %s", strerror(errno));
+      continue;
+    }
+
+    // Disable Nagle
+    int flag = 1;
+    ::setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+
+    char client_ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
+    LOG_INFO("Client connected from %s:%u", client_ip,
+             ntohs(client_addr.sin_port));
+
+    // Read subscription request
+    TcpRequest req;
+    ssize_t n = ::recv(client_fd, &req, sizeof(req), MSG_WAITALL);
+    if (n != sizeof(req)) {
+      LOG_ERR("Failed to read TcpRequest");
+      ::close(client_fd);
+      continue;
+    }
+
+    if (req.reqKey != MAGIC_KEY) {
+      LOG_ERR("Invalid magic key: 0x%X (expected 0x%X)", req.reqKey, MAGIC_KEY);
+      ::close(client_fd);
+      continue;
+    }
+
+    char item[33] = {};
+    std::memcpy(item, req.reqItem, 32);
+    char client_id[33] = {};
+    std::memcpy(client_id, req.clientID, 32);
+    LOG_INFO("Subscription: item=\"%s\", client=\"%s\", lastSeq=%lu", item,
+             client_id, req.lastRespSeq);
+
+    // Prepare message template
+    std::vector<char> frame(total_msg_len);
+
+    // Fill body with pattern data
+    char *body_ptr = frame.data() + sizeof(TcpResponse) + sizeof(MsgHdr);
+    for (size_t j = 0; j < msg_size; ++j) {
+      body_ptr[j] = static_cast<char>('A' + (j % 26));
+    }
+
+    // Send messages
+    uint64_t seq = req.lastRespSeq + 1;
+    uint64_t sent_count = 0;
+
+    // Rate limiting: interval between messages
+    auto interval = (msg_rate > 0)
+                        ? std::chrono::nanoseconds(1000000000LL / msg_rate)
+                        : std::chrono::nanoseconds(0);
+
+    auto batch_start = std::chrono::steady_clock::now();
+    uint64_t stats_last_seq = seq;
+
+    while (!g_shutdown.load(std::memory_order_relaxed)) {
+      if (msg_count > 0 && sent_count >= msg_count) {
+        LOG_INFO("Sent all %lu messages", msg_count);
+        break;
+      }
+
+      // Build TcpResponse header
+      TcpResponse resp;
+      resp.respLen = static_cast<uint16_t>(total_msg_len);
+      resp.respSeq = seq;
+      std::memcpy(frame.data(), &resp, sizeof(TcpResponse));
+
+      // Build MsgHdr
+      MsgHdr hdr;
+      hdr.msgSeqNum = seq;
+      hdr.timestamp = static_cast<uint32_t>(
+          std::chrono::duration_cast<std::chrono::seconds>(
+              std::chrono::system_clock::now().time_since_epoch())
+              .count());
+      hdr.flags = 0;
+      std::memcpy(frame.data() + sizeof(TcpResponse), &hdr, sizeof(MsgHdr));
+
+      if (!sendAll(client_fd, frame.data(), total_msg_len)) {
+        LOG_ERR("Send failed at seq %lu", seq);
+        break;
+      }
+
+      ++seq;
+      ++sent_count;
+
+      // Rate limiting
+      if (msg_rate > 0 && interval.count() > 0) {
+        auto target = batch_start + interval * sent_count;
+        auto now = std::chrono::steady_clock::now();
+        if (now < target) {
+          std::this_thread::sleep_for(target - now);
+        }
+      }
+
+      // Periodic stats
+      if (sent_count % 10000 == 0) {
+        auto now = std::chrono::steady_clock::now();
+        double elapsed =
+            std::chrono::duration<double>(now - batch_start).count();
+        double rate = sent_count / elapsed;
+        LOG_INFO("[Server] sent=%lu rate=%.0f msgs/s", sent_count, rate);
+      }
+    }
+
+    LOG_INFO("Client session ended. Sent %lu messages.", sent_count);
+    ::close(client_fd);
+  }
+
+  ::close(listen_fd);
+  LOG_INFO("Server stopped.");
+  LogMsg::getInstance().shutdown();
+  return 0;
+}

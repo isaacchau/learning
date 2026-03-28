@@ -1,0 +1,230 @@
+#include "log_msg.h"
+#include "msg_client.h"
+
+#include <atomic>
+#include <chrono>
+#include <csignal>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <unistd.h>
+
+// ============================================================================
+// Global shutdown flag for signal handling
+// ============================================================================
+
+static std::atomic<bool> g_shutdown(false);
+
+static void signalHandler(int signum) {
+  (void)signum;
+  g_shutdown.store(true, std::memory_order_release);
+}
+
+// ============================================================================
+// Command-line usage
+// ============================================================================
+
+static void printUsage(const char *prog) {
+  fprintf(stderr,
+          "Usage: %s [options]\n"
+          "Options:\n"
+          "  --host <addr>        Server hostname/IP  (default: 127.0.0.1)\n"
+          "  --port <port>        Server port          (default: 8888)\n"
+          "  --item <name>        Subscription item   (default: \"default\")\n"
+          "  --seq <num>          Starting sequence     (default: 0)\n"
+          "  --workers <num>      Worker thread count   (default: 2)\n"
+          "  --raw-queue <size>   Raw queue size        (default: 8192)\n"
+          "  --dec-queue <size>   Decoded queue size    (default: 8192)\n"
+          "  --reconnect <ms>     Reconnect interval    (default: 3000)\n"
+          "  --stats-interval <s> Stats print interval  (default: 5)\n"
+          "  --log-dir <path>     Directory for logs    (default: ./log)\n"
+          "  --log-stdout <lvl>   STDOUT log level      (default: 6/INFO)\n"
+          "  --log-file <lvl>     FILE log level        (default: 7/DEBUG)\n"
+          "  --log-syslog <lvl>   SYSLOG log level      (default: 5/NOTICE)\n"
+          "  -h, --help           Show this help\n",
+          prog);
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
+int main(int argc, char *argv[]) {
+  // Environment parsing helpers
+  auto getEnvStr = [](const char *name, const char *def) -> std::string {
+    const char *val = std::getenv(name);
+    return val ? val : def;
+  };
+  auto getEnvInt = [](const char *name, int def) -> int {
+    const char *val = std::getenv(name);
+    if (val) {
+      try { return std::stoi(val); } catch (...) {}
+    }
+    return def;
+  };
+  auto getEnvUll = [](const char *name, uint64_t def) -> uint64_t {
+    const char *val = std::getenv(name);
+    if (val) {
+      try { return std::stoull(val); } catch (...) {}
+    }
+    return def;
+  };
+
+  // Level 3 (Defaults) overridden by Level 2 (Environment Variables)
+  MsgClientConfig config;
+  config.host                 = getEnvStr("APP_TCP_CLIENT_HOST", "127.0.0.1");
+  config.port                 = static_cast<uint16_t>(getEnvInt("APP_TCP_CLIENT_PORT", 8888));
+  config.item_name           = getEnvStr("APP_TCP_CLIENT_ITEM", "default");
+  config.starting_seq_num     = getEnvUll("APP_TCP_CLIENT_SEQ", 0);
+  config.worker_thread_count  = static_cast<size_t>(getEnvInt("APP_TCP_CLIENT_WORKERS", 2));
+  config.raw_queue_size       = static_cast<size_t>(getEnvInt("APP_TCP_CLIENT_RAW_QUEUE", 8192));
+  config.decoded_queue_size   = static_cast<size_t>(getEnvInt("APP_TCP_CLIENT_DEC_QUEUE", 8192));
+  config.reconnect_interval_ms= getEnvInt("APP_TCP_CLIENT_RECONNECT", 3000);
+
+  int stats_interval_sec = getEnvInt("APP_TCP_CLIENT_STATS_INTERVAL", 5);
+  std::string log_dir = getEnvStr("APP_LOG_DIR", "");
+  int log_stdout = -1;
+  int log_file = -1;
+  int log_syslog = -1;
+
+  // Parse command-line arguments
+  for (int i = 1; i < argc; ++i) {
+    if ((strcmp(argv[i], "--host") == 0) && i + 1 < argc) {
+      config.host = argv[++i];
+    } else if ((strcmp(argv[i], "--port") == 0) && i + 1 < argc) {
+      config.port = static_cast<uint16_t>(std::stoi(argv[++i]));
+    } else if ((strcmp(argv[i], "--item") == 0) && i + 1 < argc) {
+      config.item_name = argv[++i];
+    } else if ((strcmp(argv[i], "--seq") == 0) && i + 1 < argc) {
+      config.starting_seq_num = std::stoull(argv[++i]);
+    } else if ((strcmp(argv[i], "--workers") == 0) && i + 1 < argc) {
+      config.worker_thread_count = static_cast<size_t>(std::stoi(argv[++i]));
+    } else if ((strcmp(argv[i], "--raw-queue") == 0) && i + 1 < argc) {
+      config.raw_queue_size = static_cast<size_t>(std::stoi(argv[++i]));
+    } else if ((strcmp(argv[i], "--dec-queue") == 0) && i + 1 < argc) {
+      config.decoded_queue_size = static_cast<size_t>(std::stoi(argv[++i]));
+    } else if ((strcmp(argv[i], "--reconnect") == 0) && i + 1 < argc) {
+      config.reconnect_interval_ms = std::stoi(argv[++i]);
+    } else if ((strcmp(argv[i], "--stats-interval") == 0) && i + 1 < argc) {
+      stats_interval_sec = std::stoi(argv[++i]);
+    } else if ((strcmp(argv[i], "--log-dir") == 0) && i + 1 < argc) {
+      log_dir = argv[++i];
+    } else if ((strcmp(argv[i], "--log-stdout") == 0) && i + 1 < argc) {
+      log_stdout = std::stoi(argv[++i]);
+    } else if ((strcmp(argv[i], "--log-file") == 0) && i + 1 < argc) {
+      log_file = std::stoi(argv[++i]);
+    } else if ((strcmp(argv[i], "--log-syslog") == 0) && i + 1 < argc) {
+      log_syslog = std::stoi(argv[++i]);
+    } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+      printUsage(argv[0]);
+      return 0;
+    } else {
+      fprintf(stderr, "Unknown option: %s\n", argv[i]);
+      printUsage(argv[0]);
+      return 1;
+    }
+  }
+
+  // Initialize high-performance logger
+  LogMsg::getInstance().init(argv[0], log_dir.empty() ? nullptr : log_dir.c_str(),
+                             log_stdout, log_file, log_syslog);
+
+  // Install signal handlers for graceful shutdown
+  struct sigaction sa;
+  std::memset(&sa, 0, sizeof(sa));
+  sa.sa_handler = signalHandler;
+  sigemptyset(&sa.sa_mask);
+  sigaction(SIGINT, &sa, nullptr);
+  sigaction(SIGTERM, &sa, nullptr);
+
+  // Ignore SIGPIPE (broken pipe on send)
+  signal(SIGPIPE, SIG_IGN);
+
+  // Print configuration
+  LOG_INFO("=== MsgClient Configuration ===\n"
+           "  Host:           %s\n"
+           "  Port:           %u\n"
+           "  Item:          %s\n"
+           "  Starting Seq:   %lu\n"
+           "  Workers:        %zu\n"
+           "  Raw Queue:      %zu\n"
+           "  Decoded Queue:  %zu (per worker)\n"
+           "  Reconnect:      %d ms\n"
+           "  Stats Interval: %d s\n"
+           "================================",
+           config.host.c_str(), config.port, config.item_name.c_str(),
+           config.starting_seq_num, config.worker_thread_count,
+           config.raw_queue_size, config.decoded_queue_size,
+           config.reconnect_interval_ms, stats_interval_sec);
+
+  // Create and start client
+  MsgClient client(config);
+
+  client.setMessageHandler([](const SubMessage &msg, size_t worker_index) {
+    // Default handler: silent processing.
+    // In production, replace with actual business logic.
+    (void)msg;
+    (void)worker_index;
+  });
+
+  client.start();
+  LOG_INFO("[Main] Client started. Press Ctrl+C to stop.");
+
+  // Statistics reporting loop
+  auto last_print = std::chrono::steady_clock::now();
+  StatsSnapshot prev_snap = {};
+
+  while (!g_shutdown.load(std::memory_order_relaxed)) {
+    sleep(1);
+
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed =
+        std::chrono::duration_cast<std::chrono::seconds>(now - last_print)
+            .count();
+
+    if (elapsed >= stats_interval_sec) {
+      StatsSnapshot snap = client.getStats();
+
+      uint64_t delta_recv =
+          snap.messages_received - prev_snap.messages_received;
+      uint64_t delta_proc =
+          snap.messages_processed - prev_snap.messages_processed;
+      uint64_t delta_bytes = snap.bytes_received - prev_snap.bytes_received;
+      double mbps = (delta_bytes * 8.0) / (elapsed * 1000000.0);
+
+      LOG_INFO("[Stats] recv=%lu(+%lu) decoded=%lu proc=%lu(+%lu) "
+               "bytes=%lu(%.2f Mbps) reconnects=%lu "
+               "parse_err=%lu q_full=%lu",
+               snap.messages_received, delta_recv, snap.messages_decoded,
+               snap.messages_processed, delta_proc, snap.bytes_received, mbps,
+               snap.reconnect_count, snap.parse_errors, snap.queue_full_errors);
+
+      prev_snap = snap;
+      last_print = now;
+    }
+  }
+
+  // Graceful shutdown
+  LOG_INFO("[Main] Shutting down...");
+  client.stop();
+
+  // Final statistics
+  StatsSnapshot final_snap = client.getStats();
+  LOG_INFO("\n=== Final Statistics ===\n"
+           "  Messages Received:  %lu\n"
+           "  Messages Decoded:   %lu\n"
+           "  Messages Processed: %lu\n"
+           "  Bytes Received:     %lu\n"
+           "  Reconnects:         %lu\n"
+           "  Parse Errors:       %lu\n"
+           "  Queue Full Errors:  %lu\n"
+           "========================",
+           final_snap.messages_received, final_snap.messages_decoded,
+           final_snap.messages_processed, final_snap.bytes_received,
+           final_snap.reconnect_count, final_snap.parse_errors,
+           final_snap.queue_full_errors);
+
+  LogMsg::getInstance().shutdown();
+  return 0;
+}
