@@ -294,7 +294,7 @@ bool MsgClient::connectToServer() {
     return true;
 }
 
-void MsgClient::sendSubscription() {
+bool MsgClient::sendSubscription() {
     TcpRequest req;
     std::memset(&req, 0, sizeof(req));
     req.reqKey = MAGIC_KEY;
@@ -306,7 +306,9 @@ void MsgClient::sendSubscription() {
     if (sent != sizeof(req)) {
         LOG_ERR("[MsgClient] Failed to send subscription: %s",
                 strerror(errno));
+        return false;
     }
+    return true;
 }
 
 void MsgClient::closeSocket() {
@@ -329,7 +331,14 @@ void MsgClient::ioLoop() {
         }
 
         // Send subscription request
-        sendSubscription();
+        if (!sendSubscription()) {
+            LOG_ERR("[MsgClient] Failed to send subscription, reconnecting...");
+            closeSocket();
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(config_.reconnect_interval_ms));
+            stats_.reconnect_count.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
 
         // Allocate initial receive buffer from pool
         auto recv_buf = pool_->allocate(RECV_BUFFER_SIZE);

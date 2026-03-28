@@ -262,7 +262,7 @@ private:
 
     // Connection helpers
     bool connectToServer();
-    void sendSubscription();
+    bool sendSubscription();
     void closeSocket();
 
     // Configuration
