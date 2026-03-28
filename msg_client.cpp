@@ -133,6 +133,7 @@ StatsSnapshot MsgClient::getStats() const {
     snap.messages_received  = stats_.messages_received.load(std::memory_order_relaxed);
     snap.messages_decoded   = stats_.messages_decoded.load(std::memory_order_relaxed);
     snap.messages_processed = stats_.messages_processed.load(std::memory_order_relaxed);
+    snap.messages_dropped   = stats_.messages_dropped.load(std::memory_order_relaxed);
     snap.bytes_received     = stats_.bytes_received.load(std::memory_order_relaxed);
     snap.reconnect_count    = stats_.reconnect_count.load(std::memory_order_relaxed);
     snap.parse_errors       = stats_.parse_errors.load(std::memory_order_relaxed);
@@ -350,8 +351,10 @@ void MsgClient::ioLoop() {
                 raw.length  = resp.respLen;
                 raw.seq_num = resp.respSeq;
 
-                if (!raw_queue_->push_wait(std::move(raw), 5)) {
+                if (!raw_queue_->push_wait(std::move(raw), config_.queue_push_timeout_ms)) {
                     stats_.queue_full_errors.fetch_add(1, std::memory_order_relaxed);
+                    stats_.messages_dropped.fetch_add(1, std::memory_order_relaxed);
+                    LOG_WARN("[MsgClient] Message dropped: raw queue full (seq=%lu)", raw.seq_num);
                 }
 
                 stats_.messages_received.fetch_add(1, std::memory_order_relaxed);
@@ -445,8 +448,11 @@ void MsgClient::decoderLoop() {
         raw.buffer.reset();
 
         // Round-robin push to worker queues
-        if (!decoded_queues_[worker_idx]->push_wait(std::move(sub), 5)) {
+        if (!decoded_queues_[worker_idx]->push_wait(std::move(sub), config_.queue_push_timeout_ms)) {
             stats_.queue_full_errors.fetch_add(1, std::memory_order_relaxed);
+            stats_.messages_dropped.fetch_add(1, std::memory_order_relaxed);
+            LOG_WARN("[MsgClient] Message dropped: worker queue full (seq=%lu, worker=%zu)", 
+                     sub.seq_num, worker_idx);
         }
 
         stats_.messages_decoded.fetch_add(1, std::memory_order_relaxed);

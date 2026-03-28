@@ -130,6 +130,22 @@ namespace Defaults {
     constexpr int           THREAD_JOIN_TIMEOUT_MS = 5000; // Thread join timeout
     
     // Push wait timeout for queues (when full)
+    // NOTE: This uses a "drop" strategy rather than backpressure.
+    // 
+    // Why drop instead of backpressure?
+    // - Backpressure (stopping recv()) causes TCP buffer buildup
+    // - This can exhaust server memory when serving multiple clients
+    // - A slow/bad client could DoS the server and affect other clients
+    // - Dropping messages protects the server from rogue clients
+    //
+    // This is appropriate for:
+    // - Real-time data where freshness matters more than completeness
+    // - Pub/sub systems where clients shouldn't affect each other
+    // - High-frequency streams where old data has no value
+    //
+    // Use a longer timeout (or 0 = wait forever) only if you have:
+    // - 1:1 client-server relationship, OR
+    // - Server has per-client isolation and circuit breakers
     constexpr int           QUEUE_PUSH_TIMEOUT_MS = 5;
 }
 
@@ -151,6 +167,10 @@ struct MsgClientConfig {
     size_t decoded_queue_size           = Defaults::DECODED_QUEUE_SIZE;
 
     int    reconnect_interval_ms        = Defaults::RECONNECT_INTERVAL_MS;
+    
+    // Queue push timeout in milliseconds (0 = wait forever, -1 = don't wait)
+    // See Defaults::QUEUE_PUSH_TIMEOUT_MS comment for design rationale
+    int    queue_push_timeout_ms        = Defaults::QUEUE_PUSH_TIMEOUT_MS;
 
     std::vector<SizeClassConfig> pool_config; // Empty = use defaults
 };
@@ -163,20 +183,22 @@ struct MsgClientStats {
     std::atomic<uint64_t> messages_received{0};
     std::atomic<uint64_t> messages_decoded{0};
     std::atomic<uint64_t> messages_processed{0};
+    std::atomic<uint64_t> messages_dropped{0};  // Dropped due to full queue (see design note)
     std::atomic<uint64_t> bytes_received{0};
     std::atomic<uint64_t> reconnect_count{0};
     std::atomic<uint64_t> parse_errors{0};
-    std::atomic<uint64_t> queue_full_errors{0};
+    std::atomic<uint64_t> queue_full_errors{0};  // Deprecated: use messages_dropped
 };
 
 struct StatsSnapshot {
     uint64_t messages_received;
     uint64_t messages_decoded;
     uint64_t messages_processed;
+    uint64_t messages_dropped;  // Dropped due to full queue
     uint64_t bytes_received;
     uint64_t reconnect_count;
     uint64_t parse_errors;
-    uint64_t queue_full_errors;
+    uint64_t queue_full_errors;  // Deprecated: use messages_dropped
 };
 
 // ============================================================================

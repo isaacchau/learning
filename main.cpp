@@ -37,6 +37,8 @@ static void printUsage(const char *prog) {
           "  --raw-queue <size>   Raw queue size        (default: %zu)\n"
           "  --dec-queue <size>   Decoded queue size    (default: %zu)\n"
           "  --reconnect <ms>     Reconnect interval    (default: %d)\n"
+          "  --queue-timeout <ms> Queue push timeout    (default: %d)\n"
+          "                       (0=wait forever, -1=no wait, >0=timeout ms)\n"
           "  --stats-interval <s> Stats print interval  (default: %d)\n"
           "  --log-dir <path>     Directory for logs    (default: ./log)\n"
           "  --log-stdout <lvl>   STDOUT log level      (default: 6/INFO)\n"
@@ -52,6 +54,7 @@ static void printUsage(const char *prog) {
           Defaults::RAW_QUEUE_SIZE,
           Defaults::DECODED_QUEUE_SIZE,
           Defaults::RECONNECT_INTERVAL_MS,
+          Defaults::QUEUE_PUSH_TIMEOUT_MS,
           Defaults::STATS_INTERVAL_SEC);
 }
 
@@ -89,9 +92,10 @@ int main(int argc, char *argv[]) {
   config.worker_thread_count  = static_cast<size_t>(getEnvInt("APP_TCP_CLIENT_WORKERS", 2));
   config.raw_queue_size       = static_cast<size_t>(getEnvInt("APP_TCP_CLIENT_RAW_QUEUE", 8192));
   config.decoded_queue_size   = static_cast<size_t>(getEnvInt("APP_TCP_CLIENT_DEC_QUEUE", 8192));
-  config.reconnect_interval_ms= getEnvInt("APP_TCP_CLIENT_RECONNECT", 3000);
+  config.reconnect_interval_ms= getEnvInt("APP_TCP_CLIENT_RECONNECT", Defaults::RECONNECT_INTERVAL_MS);
+  config.queue_push_timeout_ms= getEnvInt("APP_TCP_CLIENT_QUEUE_TIMEOUT", Defaults::QUEUE_PUSH_TIMEOUT_MS);
 
-  int stats_interval_sec = getEnvInt("APP_TCP_CLIENT_STATS_INTERVAL", 5);
+  int stats_interval_sec = getEnvInt("APP_TCP_CLIENT_STATS_INTERVAL", Defaults::STATS_INTERVAL_SEC);
   std::string log_dir = getEnvStr("APP_LOG_DIR", "");
   int log_stdout = -1;
   int log_file = -1;
@@ -115,6 +119,8 @@ int main(int argc, char *argv[]) {
       config.decoded_queue_size = static_cast<size_t>(std::stoi(argv[++i]));
     } else if ((strcmp(argv[i], "--reconnect") == 0) && i + 1 < argc) {
       config.reconnect_interval_ms = std::stoi(argv[++i]);
+    } else if ((strcmp(argv[i], "--queue-timeout") == 0) && i + 1 < argc) {
+      config.queue_push_timeout_ms = std::stoi(argv[++i]);
     } else if ((strcmp(argv[i], "--stats-interval") == 0) && i + 1 < argc) {
       stats_interval_sec = std::stoi(argv[++i]);
     } else if ((strcmp(argv[i], "--log-dir") == 0) && i + 1 < argc) {
@@ -154,18 +160,20 @@ int main(int argc, char *argv[]) {
   LOG_INFO("=== MsgClient Configuration ===\n"
            "  Host:           %s\n"
            "  Port:           %u\n"
-           "  Item:          %s\n"
+           "  Item:           %s\n"
            "  Starting Seq:   %lu\n"
            "  Workers:        %zu\n"
            "  Raw Queue:      %zu\n"
            "  Decoded Queue:  %zu (per worker)\n"
            "  Reconnect:      %d ms\n"
+           "  Queue Timeout:  %d ms\n"
            "  Stats Interval: %d s\n"
            "================================",
            config.host.c_str(), config.port, config.item_name.c_str(),
            config.starting_seq_num, config.worker_thread_count,
            config.raw_queue_size, config.decoded_queue_size,
-           config.reconnect_interval_ms, stats_interval_sec);
+           config.reconnect_interval_ms, config.queue_push_timeout_ms,
+           stats_interval_sec);
 
   // Create and start client
   MsgClient client(config);
@@ -203,11 +211,12 @@ int main(int argc, char *argv[]) {
       double mbps = (delta_bytes * 8.0) / (elapsed * 1000000.0);
 
       LOG_INFO("[Stats] recv=%lu(+%lu) decoded=%lu proc=%lu(+%lu) "
-               "bytes=%lu(%.2f Mbps) reconnects=%lu "
-               "parse_err=%lu q_full=%lu",
+               "dropped=%lu bytes=%lu(%.2f Mbps) reconnects=%lu "
+               "parse_err=%lu",
                snap.messages_received, delta_recv, snap.messages_decoded,
-               snap.messages_processed, delta_proc, snap.bytes_received, mbps,
-               snap.reconnect_count, snap.parse_errors, snap.queue_full_errors);
+               snap.messages_processed, delta_proc, snap.messages_dropped,
+               snap.bytes_received, mbps,
+               snap.reconnect_count, snap.parse_errors);
 
       prev_snap = snap;
       last_print = now;
@@ -224,15 +233,15 @@ int main(int argc, char *argv[]) {
            "  Messages Received:  %lu\n"
            "  Messages Decoded:   %lu\n"
            "  Messages Processed: %lu\n"
+           "  Messages Dropped:   %lu\n"
            "  Bytes Received:     %lu\n"
            "  Reconnects:         %lu\n"
            "  Parse Errors:       %lu\n"
-           "  Queue Full Errors:  %lu\n"
            "========================",
            final_snap.messages_received, final_snap.messages_decoded,
-           final_snap.messages_processed, final_snap.bytes_received,
-           final_snap.reconnect_count, final_snap.parse_errors,
-           final_snap.queue_full_errors);
+           final_snap.messages_processed, final_snap.messages_dropped,
+           final_snap.bytes_received, final_snap.reconnect_count,
+           final_snap.parse_errors);
 
   LogMsg::getInstance().shutdown();
   return 0;
