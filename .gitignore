@@ -1,5 +1,6 @@
 cppcheck_output.txt
 msg_client
 msg_test_server
+test_runner
 *.o
 log/*

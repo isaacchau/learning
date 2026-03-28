@@ -28,7 +28,11 @@ DEBUG_OBJS  = $(CLIENT_SRCS:.cpp=.dbg.o)
 # Headers for dependency tracking
 HEADERS  = lockfree_ringbuffer.h shared_ptr_pool.h protocol.h msg_client.h log_msg.h
 
-.PHONY: all clean debug run run-server check format
+# Test files
+TEST_SRC   = tests/test_main.cpp
+TEST_BIN   = test_runner
+
+.PHONY: all clean debug run run-server check format test
 
 all: $(TARGET_CLIENT) $(TARGET_SERVER)
 
@@ -53,10 +57,6 @@ $(TARGET_DEBUG): $(DEBUG_OBJS)
 %.dbg.o: %.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS_DEBUG) -c $< -o $@
 
-# Clean everything
-clean:
-	rm -f $(CLIENT_OBJS) $(SERVER_OBJS) $(DEBUG_OBJS) $(TARGET_CLIENT) $(TARGET_SERVER) $(TARGET_DEBUG)
-
 # Helper: Run with defaults (can override via ENV vars now!)
 run: $(TARGET_CLIENT)
 	./$(TARGET_CLIENT)
@@ -71,4 +71,22 @@ check:
 
 # Format code
 format:
-	clang-format -i *.cpp *.h 2>/dev/null || echo "clang-format not installed"
+	clang-format -i *.cpp *.h tests/*.cpp 2>/dev/null || echo "clang-format not installed"
+
+# ============================================================================
+# Unit Tests
+# ============================================================================
+
+# Build test runner
+test: $(TEST_BIN)
+	@echo "Running unit tests..."
+	@./$(TEST_BIN)
+
+$(TEST_BIN): $(TEST_SRC) $(HEADERS)
+	$(CXX) $(CXXFLAGS_DEBUG) -I. $(TEST_SRC) -o $(TEST_BIN) $(LDFLAGS_DEBUG)
+
+# Clean test binaries too
+clean:
+	rm -f $(CLIENT_OBJS) $(SERVER_OBJS) $(DEBUG_OBJS) \
+	      $(TARGET_CLIENT) $(TARGET_SERVER) $(TARGET_DEBUG) \
+	      $(TEST_BIN)
