@@ -27,7 +27,6 @@
 
 MsgClient::MsgClient(const MsgClientConfig& config)
     : config_(config)
-    , socket_fd_(-1)
     , running_(false)
 {
     // Clamp worker count
@@ -133,16 +132,17 @@ bool MsgClient::connectToServer() {
     }
 
     // Create socket
-    socket_fd_ = ::socket(result->ai_family, result->ai_socktype, result->ai_protocol);
-    if (socket_fd_ < 0) {
+    int fd = ::socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+    if (fd < 0) {
         LOG_ERR("[MsgClient] socket() failed: %s", strerror(errno));
         ::freeaddrinfo(result);
         return false;
     }
+    socket_guard_.reset(fd);
 
     // Enable TCP Keepalive
     int keepalive = 1;
-    if (::setsockopt(socket_fd_, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive)) == 0) {
+    if (::setsockopt(socket_guard_.get(), SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive)) == 0) {
 #ifdef __linux__
         auto getEnvInt = [](const char* name, int def) -> int {
             const char* val = std::getenv(name);
@@ -156,9 +156,9 @@ bool MsgClient::connectToServer() {
         int intvl = getEnvInt("TCP_KEEPINTVL", 3);
         int cnt   = getEnvInt("TCP_KEEPCNT", 3);
 
-        ::setsockopt(socket_fd_, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
-        ::setsockopt(socket_fd_, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
-        ::setsockopt(socket_fd_, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
+        ::setsockopt(socket_guard_.get(), IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+        ::setsockopt(socket_guard_.get(), IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+        ::setsockopt(socket_guard_.get(), IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
         
         LOG_INFO("[MsgClient] TCP Keepalive configured: idle=%ds, intvl=%ds, probes=%d", idle, intvl, cnt);
 #else
@@ -172,20 +172,20 @@ bool MsgClient::connectToServer() {
     struct timeval tv;
     tv.tv_sec  = 5;
     tv.tv_usec = 0;
-    ::setsockopt(socket_fd_, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    ::setsockopt(socket_guard_.get(), SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
     // Disable Nagle's algorithm for low latency
     int flag = 1;
-    ::setsockopt(socket_fd_, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+    ::setsockopt(socket_guard_.get(), IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
 
     // Connect
-    rc = ::connect(socket_fd_, result->ai_addr, result->ai_addrlen);
+    rc = ::connect(socket_guard_.get(), result->ai_addr, result->ai_addrlen);
     ::freeaddrinfo(result);
 
     if (rc < 0) {
         LOG_ERR("[MsgClient] connect() to %s:%u failed: %s",
                 config_.host.c_str(), config_.port, strerror(errno));
-        closeSocket();
+        socket_guard_.close();
         return false;
     }
 
@@ -202,7 +202,7 @@ void MsgClient::sendSubscription() {
     req.lastRespSeq = config_.starting_seq_num;
     snprintf(req.clientID, sizeof(req.clientID), "MsgClient");
 
-    ssize_t sent = ::send(socket_fd_, &req, sizeof(req), MSG_NOSIGNAL);
+    ssize_t sent = ::send(socket_guard_.get(), &req, sizeof(req), MSG_NOSIGNAL);
     if (sent != sizeof(req)) {
         LOG_ERR("[MsgClient] Failed to send subscription: %s",
                 strerror(errno));
@@ -210,11 +210,7 @@ void MsgClient::sendSubscription() {
 }
 
 void MsgClient::closeSocket() {
-    if (socket_fd_ >= 0) {
-        ::shutdown(socket_fd_, SHUT_RDWR);
-        ::close(socket_fd_);
-        socket_fd_ = -1;
-    }
+    socket_guard_.close();
 }
 
 // ============================================================================
@@ -244,7 +240,7 @@ void MsgClient::ioLoop() {
             // Poll with timeout so we can check running_ periodically
             struct pollfd pfd;
             std::memset(&pfd, 0, sizeof(pfd));
-            pfd.fd     = socket_fd_;
+            pfd.fd     = socket_guard_.get();
             pfd.events = POLLIN;
 
             int ret = ::poll(&pfd, 1, 100); // 100ms timeout
@@ -271,7 +267,7 @@ void MsgClient::ioLoop() {
                 continue;
             }
 
-            ssize_t n = ::recv(socket_fd_, recv_buf->data + recv_used, space, 0);
+            ssize_t n = ::recv(socket_guard_.get(), recv_buf->data + recv_used, space, 0);
             if (n <= 0) {
                 if (n == 0) {
                     LOG_INFO("[MsgClient] Server closed connection");

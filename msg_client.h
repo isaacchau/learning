@@ -13,6 +13,71 @@
 #include "shared_ptr_pool.h"
 #include "protocol.h"
 
+#include <sys/socket.h>  // For shutdown(), SHUT_RDWR
+#include <unistd.h>      // For close()
+
+// ============================================================================
+// RAII Socket Wrapper - ensures socket is always closed properly
+// ============================================================================
+
+class SocketGuard {
+public:
+    SocketGuard() : fd_(-1) {}
+    explicit SocketGuard(int fd) : fd_(fd) {}
+    
+    ~SocketGuard() { close(); }
+    
+    // Non-copyable
+    SocketGuard(const SocketGuard&) = delete;
+    SocketGuard& operator=(const SocketGuard&) = delete;
+    
+    // Movable
+    SocketGuard(SocketGuard&& other) noexcept : fd_(other.release()) {}
+    SocketGuard& operator=(SocketGuard&& other) noexcept {
+        if (this != &other) {
+            close();
+            fd_ = other.release();
+        }
+        return *this;
+    }
+    
+    // Reset with new fd
+    void reset(int fd = -1) {
+        if (fd_ != fd) {
+            close();
+            fd_ = fd;
+        }
+    }
+    
+    // Release ownership without closing
+    int release() noexcept {
+        int tmp = fd_;
+        fd_ = -1;
+        return tmp;
+    }
+    
+    // Close the socket
+    void close() {
+        if (fd_ >= 0) {
+            ::shutdown(fd_, SHUT_RDWR);
+            ::close(fd_);
+            fd_ = -1;
+        }
+    }
+    
+    // Get the fd
+    int get() const noexcept { return fd_; }
+    
+    // Check if valid
+    bool valid() const noexcept { return fd_ >= 0; }
+    
+    // Boolean conversion
+    explicit operator bool() const noexcept { return valid(); }
+    
+private:
+    int fd_;
+};
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -125,8 +190,8 @@ private:
     // Message handler
     MessageHandler handler_;
 
-    // Socket
-    int socket_fd_;
+    // Socket (RAII wrapped)
+    SocketGuard socket_guard_;
 
     // Control flag
     std::atomic<bool> running_;
