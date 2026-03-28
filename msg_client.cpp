@@ -30,8 +30,12 @@ MsgClient::MsgClient(const MsgClientConfig& config)
     , running_(false)
 {
     // Clamp worker count
-    if (config_.worker_thread_count == 0) config_.worker_thread_count = 1;
-    if (config_.worker_thread_count > 64) config_.worker_thread_count = 64;
+    if (config_.worker_thread_count < Defaults::MIN_WORKER_THREADS) {
+        config_.worker_thread_count = Defaults::MIN_WORKER_THREADS;
+    }
+    if (config_.worker_thread_count > Defaults::MAX_WORKER_THREADS) {
+        config_.worker_thread_count = Defaults::MAX_WORKER_THREADS;
+    }
 
     // Create memory pool
     if (config_.pool_config.empty()) {
@@ -88,7 +92,7 @@ void MsgClient::stop() {
     closeSocket();
 
     // Join threads with timeout (5 seconds each)
-    const int JOIN_TIMEOUT_MS = 5000;
+    const int JOIN_TIMEOUT_MS = Defaults::THREAD_JOIN_TIMEOUT_MS;
     bool io_joined = true, decoder_joined = true;
     
     if (io_thread_.joinable()) {
@@ -275,7 +279,7 @@ void MsgClient::ioLoop() {
             pfd.fd     = socket_guard_.get();
             pfd.events = POLLIN;
 
-            int ret = ::poll(&pfd, 1, 100); // 100ms timeout
+            int ret = ::poll(&pfd, 1, Defaults::POLL_TIMEOUT_MS); // 100ms timeout
             if (ret < 0) {
                 if (errno == EINTR) continue;
                 LOG_ERR("[MsgClient] poll() error: %s", strerror(errno));
@@ -411,7 +415,7 @@ void MsgClient::decoderLoop() {
     RawMessage raw;
 
     while (running_.load(std::memory_order_relaxed)) {
-        if (!raw_queue_->pop_wait(raw, 100)) {
+        if (!raw_queue_->pop_wait(raw, Defaults::QUEUE_POP_TIMEOUT_MS)) {
             continue; // Timeout — re-check running_
         }
 
@@ -458,7 +462,7 @@ void MsgClient::workerLoop(size_t worker_index) {
     SubMessage msg;
 
     while (running_.load(std::memory_order_relaxed)) {
-        if (!decoded_queues_[worker_index]->pop_wait(msg, 100)) {
+        if (!decoded_queues_[worker_index]->pop_wait(msg, Defaults::QUEUE_POP_TIMEOUT_MS)) {
             continue; // Timeout — re-check running_
         }
 

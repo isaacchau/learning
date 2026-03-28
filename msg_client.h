@@ -102,23 +102,55 @@ inline bool joinWithTimeout(std::thread& t, int timeout_ms) {
 }
 
 // ============================================================================
+// Configuration Constants
+// ============================================================================
+
+// Default configuration values
+namespace Defaults {
+    constexpr const char*   HOST                 = "127.0.0.1";
+    constexpr uint16_t      PORT                 = 8888;
+    constexpr const char*   ITEM_NAME            = "default";
+    constexpr uint64_t      STARTING_SEQ_NUM     = 0;
+    
+    constexpr size_t        IO_THREAD_COUNT      = 1;     // Fixed: single IO thread
+    constexpr size_t        DECODER_THREAD_COUNT = 1;     // Fixed: single decoder thread
+    constexpr size_t        WORKER_THREAD_COUNT  = 2;     // Configurable: 1-64
+    constexpr size_t        MIN_WORKER_THREADS   = 1;
+    constexpr size_t        MAX_WORKER_THREADS   = 64;
+    
+    constexpr size_t        RAW_QUEUE_SIZE       = 8192;  // SPSC queue: IO → decoder
+    constexpr size_t        DECODED_QUEUE_SIZE   = 8192;  // Per-worker SPSC queue
+    
+    constexpr int           RECONNECT_INTERVAL_MS= 3000;
+    constexpr int           STATS_INTERVAL_SEC   = 5;
+    
+    // Timeouts
+    constexpr int           POLL_TIMEOUT_MS      = 100;   // poll() wait time
+    constexpr int           QUEUE_POP_TIMEOUT_MS = 100;   // Queue pop wait time
+    constexpr int           THREAD_JOIN_TIMEOUT_MS = 5000; // Thread join timeout
+    
+    // Push wait timeout for queues (when full)
+    constexpr int           QUEUE_PUSH_TIMEOUT_MS = 5;
+}
+
+// ============================================================================
 // Configuration
 // ============================================================================
 
 struct MsgClientConfig {
-    std::string host;
-    uint16_t    port                 = 0;
-    std::string item_name;
-    uint64_t    starting_seq_num     = 0;
+    std::string host                    = Defaults::HOST;
+    uint16_t    port                    = Defaults::PORT;
+    std::string item_name               = Defaults::ITEM_NAME;
+    uint64_t    starting_seq_num        = Defaults::STARTING_SEQ_NUM;
 
-    size_t io_thread_count           = 1;    // Fixed: single IO thread
-    size_t decoder_thread_count      = 1;    // Fixed: single decoder thread
-    size_t worker_thread_count       = 2;    // Configurable: 0-64
+    size_t io_thread_count              = Defaults::IO_THREAD_COUNT;
+    size_t decoder_thread_count         = Defaults::DECODER_THREAD_COUNT;
+    size_t worker_thread_count          = Defaults::WORKER_THREAD_COUNT;
 
-    size_t raw_queue_size            = 8192; // SPSC queue: IO → decoder
-    size_t decoded_queue_size        = 8192; // Per-worker SPSC queue
+    size_t raw_queue_size               = Defaults::RAW_QUEUE_SIZE;
+    size_t decoded_queue_size           = Defaults::DECODED_QUEUE_SIZE;
 
-    int    reconnect_interval_ms     = 3000;
+    int    reconnect_interval_ms        = Defaults::RECONNECT_INTERVAL_MS;
 
     std::vector<SizeClassConfig> pool_config; // Empty = use defaults
 };

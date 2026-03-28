@@ -11,6 +11,15 @@
 // Single-Producer-Single-Consumer lock-free ring buffer.
 // Power-of-2 sizing with bitwise modulo for fast indexing.
 // Cache-line aligned head/tail to prevent false sharing.
+
+// Spin-wait backoff thresholds
+namespace SpinBackoff {
+    constexpr int YIELD_THRESHOLD      = 100;   // First 100 spins: just yield
+    constexpr int SLEEP_1US_THRESHOLD  = 200;   // Next 100 spins: sleep 1 microsecond
+    constexpr int SLEEP_10US_THRESHOLD = 300;   // Next 100 spins: sleep 10 microseconds
+    constexpr int SLEEP_100US_THRESHOLD= 400;   // Next 100 spins: sleep 100 microseconds
+    constexpr int SLEEP_1MS_DURATION   = 1;     // After 400 spins: sleep 1 millisecond
+}
 template <typename T>
 class LockFreeRingBuffer {
 public:
@@ -111,16 +120,16 @@ private:
         int spin = 0;
 
         while (std::chrono::steady_clock::now() < deadline) {
-            if (spin < 100) {
+            if (spin < SpinBackoff::YIELD_THRESHOLD) {
                 std::this_thread::yield();
-            } else if (spin < 200) {
+            } else if (spin < SpinBackoff::SLEEP_1US_THRESHOLD) {
                 std::this_thread::sleep_for(std::chrono::microseconds(1));
-            } else if (spin < 300) {
+            } else if (spin < SpinBackoff::SLEEP_10US_THRESHOLD) {
                 std::this_thread::sleep_for(std::chrono::microseconds(10));
-            } else if (spin < 400) {
+            } else if (spin < SpinBackoff::SLEEP_100US_THRESHOLD) {
                 std::this_thread::sleep_for(std::chrono::microseconds(100));
             } else {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                std::this_thread::sleep_for(std::chrono::milliseconds(SpinBackoff::SLEEP_1MS_DURATION));
             }
             if (tryOp()) return true;
             ++spin;

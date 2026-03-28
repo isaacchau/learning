@@ -29,21 +29,30 @@ static void printUsage(const char *prog) {
   fprintf(stderr,
           "Usage: %s [options]\n"
           "Options:\n"
-          "  --host <addr>        Server hostname/IP  (default: 127.0.0.1)\n"
-          "  --port <port>        Server port          (default: 8888)\n"
-          "  --item <name>        Subscription item   (default: \"default\")\n"
-          "  --seq <num>          Starting sequence     (default: 0)\n"
-          "  --workers <num>      Worker thread count   (default: 2)\n"
-          "  --raw-queue <size>   Raw queue size        (default: 8192)\n"
-          "  --dec-queue <size>   Decoded queue size    (default: 8192)\n"
-          "  --reconnect <ms>     Reconnect interval    (default: 3000)\n"
-          "  --stats-interval <s> Stats print interval  (default: 5)\n"
+          "  --host <addr>        Server hostname/IP  (default: %s)\n"
+          "  --port <port>        Server port          (default: %u)\n"
+          "  --item <name>        Subscription item   (default: \"%s\")\n"
+          "  --seq <num>          Starting sequence     (default: %lu)\n"
+          "  --workers <num>      Worker thread count   (default: %zu)\n"
+          "  --raw-queue <size>   Raw queue size        (default: %zu)\n"
+          "  --dec-queue <size>   Decoded queue size    (default: %zu)\n"
+          "  --reconnect <ms>     Reconnect interval    (default: %d)\n"
+          "  --stats-interval <s> Stats print interval  (default: %d)\n"
           "  --log-dir <path>     Directory for logs    (default: ./log)\n"
           "  --log-stdout <lvl>   STDOUT log level      (default: 6/INFO)\n"
           "  --log-file <lvl>     FILE log level        (default: 7/DEBUG)\n"
           "  --log-syslog <lvl>   SYSLOG log level      (default: 5/NOTICE)\n"
           "  -h, --help           Show this help\n",
-          prog);
+          prog,
+          Defaults::HOST,
+          Defaults::PORT,
+          Defaults::ITEM_NAME,
+          (unsigned long)Defaults::STARTING_SEQ_NUM,
+          Defaults::WORKER_THREAD_COUNT,
+          Defaults::RAW_QUEUE_SIZE,
+          Defaults::DECODED_QUEUE_SIZE,
+          Defaults::RECONNECT_INTERVAL_MS,
+          Defaults::STATS_INTERVAL_SEC);
 }
 
 // ============================================================================
