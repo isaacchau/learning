@@ -244,6 +244,10 @@ StatsSnapshot MsgClient::getStats() const {
     return snap;
 }
 
+std::vector<MemoryPool::Stats> MsgClient::getPoolStats() const {
+    return pool_->getStats();
+}
+
 bool MsgClient::isRunning() const {
     return running_.load(std::memory_order_relaxed);
 }

@@ -40,6 +40,7 @@ static void printUsage(const char *prog) {
           "  --queue-timeout <ms> Queue push timeout    (default: %d)\n"
           "                       (0=wait forever, -1=no wait, >0=timeout ms)\n"
           "  --stats-interval <s> Stats print interval  (default: %d)\n"
+          "  --pool-stats-interval <s>  Pool stats print interval (default: 0=off)\n"
           "  --log-dir <path>     Directory for logs    (default: ./log)\n"
           "  --log-stdout <lvl>   STDOUT log level      (default: 6/INFO)\n"
           "  --log-file <lvl>     FILE log level        (default: 7/DEBUG)\n"
@@ -96,6 +97,7 @@ int main(int argc, char *argv[]) {
   config.queue_push_timeout_ms= getEnvInt("APP_TCP_CLIENT_QUEUE_TIMEOUT", Defaults::QUEUE_PUSH_TIMEOUT_MS);
 
   int stats_interval_sec = getEnvInt("APP_TCP_CLIENT_STATS_INTERVAL", Defaults::STATS_INTERVAL_SEC);
+  int pool_stats_interval_sec = 0;  // Default: off (0 = disabled)
   std::string log_dir = getEnvStr("APP_LOG_DIR", "");
   int log_stdout = -1;
   int log_file = -1;
@@ -167,6 +169,17 @@ int main(int argc, char *argv[]) {
         stats_interval_sec = std::stoi(argv[++i]);
       } catch (...) {
         fprintf(stderr, "Error: Invalid stats interval: %s\n", argv[i]);
+        return 1;
+      }
+    } else if ((strcmp(argv[i], "--pool-stats-interval") == 0) && i + 1 < argc) {
+      try {
+        pool_stats_interval_sec = std::stoi(argv[++i]);
+        if (pool_stats_interval_sec < 0) {
+          fprintf(stderr, "Error: Pool stats interval must be >= 0\n");
+          return 1;
+        }
+      } catch (...) {
+        fprintf(stderr, "Error: Invalid pool stats interval: %s\n", argv[i]);
         return 1;
       }
     } else if ((strcmp(argv[i], "--log-dir") == 0) && i + 1 < argc) {
@@ -243,6 +256,7 @@ int main(int argc, char *argv[]) {
 
   // Statistics reporting loop
   auto last_print = std::chrono::steady_clock::now();
+  auto last_pool_print = std::chrono::steady_clock::now();
   StatsSnapshot prev_snap = {};
 
   while (!g_shutdown.load(std::memory_order_relaxed)) {
@@ -273,6 +287,23 @@ int main(int argc, char *argv[]) {
 
       prev_snap = snap;
       last_print = now;
+    }
+
+    // Pool statistics (optional, default off)
+    if (pool_stats_interval_sec > 0) {
+      auto pool_elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+          now - last_pool_print).count();
+      if (pool_elapsed >= pool_stats_interval_sec) {
+        auto pool_stats = client.getPoolStats();
+        LOG_INFO("[PoolStats] === Memory Pool Statistics ===");
+        for (const auto& s : pool_stats) {
+          LOG_INFO("[PoolStats] Size=%zuB allocated=%lu free=%zu in_use=%lu "
+                   "misses=%lu",
+                   s.block_size, s.total_allocated, s.free_count,
+                   s.current_allocated, s.pool_misses);
+        }
+        last_pool_print = now;
+      }
     }
   }
 

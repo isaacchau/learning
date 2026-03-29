@@ -289,6 +289,9 @@ public:
     // Get a snapshot of current statistics
     StatsSnapshot getStats() const;
 
+    // Get memory pool statistics
+    std::vector<MemoryPool::Stats> getPoolStats() const;
+
     // Check if the client is running
     bool isRunning() const;
 
