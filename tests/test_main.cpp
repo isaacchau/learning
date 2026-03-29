@@ -432,6 +432,37 @@ TEST(sequence_number_tracking) {
     return true;
 }
 
+TEST(pool_buffer_zeroing) {
+    // Test that buffers are zeroed when returned to pool (security feature)
+    MemoryPool pool;
+    
+    // Allocate and fill with sensitive data
+    auto buf = pool.allocate(256);
+    ASSERT_TRUE(buf != nullptr);
+    std::memset(buf->data, 'X', 256);  // Fill with 'X'
+    ASSERT_EQ('X', buf->data[0]);
+    ASSERT_EQ('X', buf->data[255]);
+    
+    // Return to pool
+    buf.reset();
+    
+    // Reallocate - should get the same buffer (from pool)
+    auto buf2 = pool.allocate(256);
+    ASSERT_TRUE(buf2 != nullptr);
+    
+    // Buffer should be zeroed (security: no data leakage)
+    bool all_zero = true;
+    for (int i = 0; i < 256; ++i) {
+        if (buf2->data[i] != 0) {
+            all_zero = false;
+            break;
+        }
+    }
+    ASSERT_TRUE(all_zero);
+    
+    return true;
+}
+
 // ============================================================================
 // Main Test Runner
 // ============================================================================

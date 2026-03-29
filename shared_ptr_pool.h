@@ -185,6 +185,12 @@ private:
     classes_[class_idx].total_returned.fetch_add(1, std::memory_order_relaxed);
     classes_[class_idx].current_allocated.fetch_sub(1, std::memory_order_relaxed);
 
+    // Security: Clear buffer contents before returning to pool.
+    // This prevents sensitive data from leaking to subsequent allocations.
+    // This is done in the worker thread (not IO thread), so it doesn't
+    // impact network receive performance.
+    std::memset(buf->data, 0, buf->capacity);
+
     std::lock_guard<std::mutex> lock(classes_[class_idx].mutex);
     if (classes_[class_idx].free_list.size() < classes_[class_idx].max_count) {
       classes_[class_idx].free_list.push_back(buf);
