@@ -148,8 +148,8 @@ namespace Defaults {
     constexpr size_t        MIN_WORKER_THREADS   = 1;
     constexpr size_t        MAX_WORKER_THREADS   = 64;
     
-    constexpr size_t        RAW_QUEUE_SIZE       = 8192;  // SPSC queue: IO → decoder
-    constexpr size_t        DECODED_QUEUE_SIZE   = 8192;  // Per-worker SPSC queue
+    constexpr size_t        RAW_QUEUE_SIZE       = 16384; // SPSC queue: IO → decoder
+    constexpr size_t        DECODED_QUEUE_SIZE   = 16384; // Per-worker SPSC queue
     
     constexpr int           RECONNECT_INTERVAL_MS= 3000;
     constexpr int           RECONNECT_MIN_MS     = 1000;  // Exponential backoff min

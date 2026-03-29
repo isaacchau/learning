@@ -289,9 +289,16 @@ int main(int argc, char *argv[]) {
       continue;
     }
 
-    // Disable Nagle
+    // Disable Nagle for low latency
     int flag = 1;
     ::setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+
+    // Increase send buffer to match client's receive buffer (2MB default)
+    // This prevents the send buffer from becoming a bottleneck during high-throughput testing
+    int sndbuf = getEnvInt("APP_TCP_SERVER_SNDBUF", 2097152);  // 2MB default
+    if (sndbuf > 0) {
+      ::setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+    }
 
     char client_ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));

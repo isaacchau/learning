@@ -238,7 +238,7 @@ index = position & (capacity - 1);  // Fast!
 ```cpp
 // Allocating/freeing constantly is slow
 while (receiving_messages) {
-    char* buffer = new char[65536];  // Slow system call
+    char* buffer = new char[65536];  // Slow system call (example size)
     recv(socket, buffer, 65536);
     process(buffer);
     delete[] buffer;  // Slow system call

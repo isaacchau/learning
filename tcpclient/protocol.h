@@ -60,7 +60,7 @@ static const size_t MIN_MSG_LEN = sizeof(TcpResponse) + sizeof(MsgHdr); // 24
 static const size_t MAX_MSG_LEN = 65535;
 
 // Receive buffer size (configurable via APP_TCP_RECV_BUFFER_SIZE env var).
-// Default: 65536 (64KB). Must be >= MAX_MSG_LEN.
+// Default: 2097152 (2MB). Must be >= MAX_MSG_LEN.
 inline size_t getRecvBufferSize() {
     const char* env = std::getenv("APP_TCP_RECV_BUFFER_SIZE");
     if (env) {
@@ -71,7 +71,7 @@ inline size_t getRecvBufferSize() {
             // Fall through to default on parse error
         }
     }
-    return 65536; // 64KB default
+    return 2097152; // 2MB default
 }
 
 // ============================================================================

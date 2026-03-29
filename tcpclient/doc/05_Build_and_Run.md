@@ -67,8 +67,8 @@ Options:
 - `--item`: Item to subscribe to (default: "default")
 - `--seq`: Starting sequence number (default: 0)
 - `--workers`: Number of worker threads (default: 2, range: 1-64)
-- `--raw-queue`: Size of raw queue (default: 8192, range: 64-1048576)
-- `--dec-queue`: Size of decoded queue per worker (default: 8192, range: 64-1048576)
+- `--raw-queue`: Size of raw queue (default: 16384, range: 64-1048576)
+- `--dec-queue`: Size of decoded queue per worker (default: 16384, range: 64-1048576)
 - `--reconnect`: Reconnect interval in ms (default: 3000, range: 100-300000)
 - `--queue-timeout`: Queue push timeout in ms (default: 5, -1=no wait, 0=wait forever)
 - `--stats-interval`: Statistics print interval in seconds (default: 5)
@@ -88,8 +88,8 @@ export APP_TCP_CLIENT_PORT="9999"
 export APP_TCP_CLIENT_ITEM="mydata"
 export APP_TCP_CLIENT_SEQ="0"
 export APP_TCP_CLIENT_WORKERS="4"
-export APP_TCP_CLIENT_RAW_QUEUE="8192"
-export APP_TCP_CLIENT_DEC_QUEUE="8192"
+export APP_TCP_CLIENT_RAW_QUEUE="16384"
+export APP_TCP_CLIENT_DEC_QUEUE="16384"
 export APP_TCP_CLIENT_RECONNECT="3000"
 export APP_TCP_CLIENT_QUEUE_TIMEOUT="5"
 export APP_TCP_CLIENT_STATS_INTERVAL="5"
@@ -109,6 +109,7 @@ export APP_TCP_SERVER_PORT="8888"
 export APP_TCP_SERVER_MSG_SIZE="256"
 export APP_TCP_SERVER_MSG_RATE="1000"
 export APP_TCP_SERVER_MSG_COUNT="0"
+export APP_TCP_SERVER_SNDBUF="2097152"   # Send buffer size in bytes (default: 2MB)
 ```
 
 **TCP Keepalive settings (Linux only):**
