@@ -112,6 +112,18 @@ export APP_TCP_SERVER_MSG_COUNT="0"
 export APP_TCP_SERVER_SNDBUF="2097152"   # Send buffer size in bytes (default: 2MB)
 ```
 
+**TCP Socket Buffer settings:**
+```bash
+export APP_TCP_SO_RCVBUF="2097152"  # TCP receive buffer size (default: 2MB)
+```
+
+**Why 2MB?** For high-bandwidth networks, the Bandwidth-Delay Product (BDP) determines the optimal buffer size:
+- **BDP = Bandwidth × Round-Trip Time**
+- Example: 1 Gbps × 10ms RTT = 1.25MB
+- Example: 10 Gbps × 1ms RTT = 1.25MB
+
+If the buffer is smaller than BDP, TCP cannot fully utilize the bandwidth. Increase this for WAN/high-latency links; decrease for memory-constrained LAN environments.
+
 **TCP Keepalive settings (Linux only):**
 ```bash
 export TCP_KEEPIDLE="10"    # Seconds before starting keepalive probes
@@ -122,7 +134,7 @@ export TCP_KEEPCNT="3"      # Number of keepalive probes before giving up
 **Protocol customization (testing/advanced):**
 ```bash
 export APP_TCP_MAGIC_KEY="0xDEADBEEF"    # Override protocol magic key
-export APP_TCP_RECV_BUFFER_SIZE="131072" # Override receive buffer size (bytes)
+export APP_TCP_RECV_BUFFER_SIZE="131072" # Override application receive buffer size (default: 64KB, min: 64KB)
 ```
 
 ### Reconnection Behavior
@@ -194,6 +206,165 @@ Environment variables take precedence over defaults but command-line arguments o
 
 # Client starting from sequence 500 (server should continue from there)
 ./msg_client --host 127.0.0.1 --port 8888 --seq 500
+```
+
+## Running in Background (Production Deployment)
+
+When you run a program via SSH and disconnect, it receives **SIGHUP** (hangup signal) and terminates by default. Here are three ways to keep it running:
+
+### Quick Comparison
+
+| Tool | When to Use | Terminal Detached? | Survives Logout? |
+|------|-------------|-------------------|------------------|
+| `nohup` | Before starting | No | ✅ Yes |
+| `disown` | After starting | No | ✅ Yes* |
+| `setsid` | Before starting | ✅ Yes | ✅ Yes |
+
+\* Only if program handles/ignores SIGHUP, or you used `nohup`
+
+### Option 1: `nohup` (Simplest)
+
+**Use when:** You want a simple way to run something before you logout.
+
+```bash
+# Start with nohup - ignores SIGHUP automatically
+nohup ./msg_client --host server --workers 4 > client.log 2>&1 &
+
+# Output goes to nohup.out by default (or your redirect)
+# Safe to logout
+```
+
+**What it does:**
+1. Sets SIGHUP handler to "ignore"
+2. Redirects output to file (or `nohup.out`)
+3. Process stays in your session but survives logout
+
+### Option 2: `disown` (Forgot to use nohup)
+
+**Use when:** You already started the process and need to logout.
+
+```bash
+# Oops, already started!
+./msg_client --host server --workers 4 &
+[1] 12345
+
+# Remove from shell's job table
+jobs          # See running jobs
+disown %1     # Remove job 1 from table (or just 'disown')
+
+# Now safe to logout
+exit
+```
+
+**What it does:**
+- Removes job from shell's tracking
+- Shell won't send SIGHUP when you exit
+- ⚠️ **Caveat:** If the program doesn't handle SIGHUP itself, it may still die
+
+### Option 3: `setsid` (True Daemon)
+
+**Use when:** You want a completely detached process (production deployment).
+
+```bash
+# Create new session - fully detached from terminal
+setsid ./msg_client --host server --workers 4 \
+    > /var/log/msg_client.log \
+    2> /var/log/msg_client.err \
+    < /dev/null &
+
+# Process is now in its own session
+# Not affected by ANY terminal signals
+```
+
+**What it does:**
+1. Creates a new session (new Session ID)
+2. New process group (becomes session leader)
+3. No controlling terminal at all
+4. Can't receive SIGHUP even if the kernel tried to send it
+
+### Visual Difference
+
+```
+nohup:                           setsid:
+┌──────────────┐                ┌──────────────┐
+│ SSH Session  │                │ SSH Session  │──SIGHUP──▶X
+│ Session 100  │                │ Session 100  │
+│              │                │              │
+│ ┌──────────┐ │                │ ┌──────────┐ │
+│ │ bash     │ │                │ │ bash     │ │
+│ │          │ │                │ │          │ │
+│ │ ┌──────┐ │ │                │ │ │(done)│ │ │
+│ │ │nohup │─┼─┤                │ │ └──────┘ │ │
+│ │ │prog  │ │ │                │ └──────────┘ │
+│ │ └──────┘ │ │                └──────────────┘
+│ └──────────┘ │                         │
+└──────────────┘                         │
+      │                                  ▼
+      │ SIGHUP sent...          ┌──────────────┐
+      ▼ ignored!                │ NEW Session  │
+   ┌────────┐                   │ Session 101  │◀── no SIGHUP!
+   │program │                   │ ┌────────┐   │
+   │survives│                   │ │program │   │
+   └────────┘                   │ │survives│   │
+                                 │ └────────┘   │
+                                 └──────────────┘
+```
+
+### Using `screen` or `tmux` (Interactive Sessions)
+
+**Use when:** You want to detach and reattach later interactively.
+
+```bash
+# Using screen
+screen -S msgclient
+./msg_client --host server --workers 4
+# Press Ctrl+A, then D to detach
+# Logout, come back later
+screen -r msgclient  # Reattach
+
+# Using tmux
+tmux new -s msgclient
+./msg_client --host server --workers 4
+# Press Ctrl+B, then D to detach
+tmux attach -t msgclient  # Reattach
+```
+
+**What they do:**
+- Create a persistent virtual terminal
+- You can detach and reattach from anywhere
+- Great for debugging and monitoring
+
+### Decision Guide
+
+| Scenario | Recommended Tool |
+|----------|------------------|
+| Simple background task | `nohup ./cmd &` |
+| Already started, need to leave | `disown` |
+| Production service/daemon | `setsid ./cmd >log 2>&1 </dev/null &` |
+| Need to monitor/reattach | `screen` or `tmux` |
+
+### Full Production Example
+
+```bash
+#!/bin/bash
+# start_production.sh
+
+LOG_DIR="/var/log/msgclient"
+mkdir -p "$LOG_DIR"
+
+# Fully detached daemon
+setsid ./msg_client \
+    --host prod.trading.server \
+    --port 8888 \
+    --item marketdata \
+    --workers 16 \
+    --raw-queue 65536 \
+    --dec-queue 65536 \
+    > "$LOG_DIR/stdout.log" \
+    2> "$LOG_DIR/stderr.log" \
+    < /dev/null &
+
+echo "Client started, PID: $!"
 ```
 
 ## Understanding Output

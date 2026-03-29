@@ -280,18 +280,19 @@ bool MsgClient::connectToServer() {
     }
     socket_guard_.reset(fd);
 
+    // Helper for reading environment variables as integers
+    auto getEnvInt = [](const char* name, int def) -> int {
+        const char* val = std::getenv(name);
+        if (val) {
+            try { return std::stoi(val); } catch (...) {}
+        }
+        return def;
+    };
+
     // Enable TCP Keepalive
     int keepalive = 1;
     if (::setsockopt(socket_guard_.get(), SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive)) == 0) {
 #ifdef __linux__
-        auto getEnvInt = [](const char* name, int def) -> int {
-            const char* val = std::getenv(name);
-            if (val) {
-                try { return std::stoi(val); } catch (...) {}
-            }
-            return def;
-        };
-
         int idle  = getEnvInt("TCP_KEEPIDLE", 10);
         int intvl = getEnvInt("TCP_KEEPINTVL", 3);
         int cnt   = getEnvInt("TCP_KEEPCNT", 3);
@@ -317,6 +318,20 @@ bool MsgClient::connectToServer() {
     // Disable Nagle's algorithm for low latency
     int flag = 1;
     ::setsockopt(socket_guard_.get(), IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+
+    // Set TCP receive buffer size (for Bandwidth-Delay Product)
+    // Default: 2MB. High-BDP networks need larger buffers to maximize throughput.
+    // BDP = Bandwidth × RTT. Example: 1Gbps × 10ms = 1.25MB
+    int rcvbuf = getEnvInt("APP_TCP_SO_RCVBUF", 2097152);  // 2MB default
+    if (rcvbuf > 0) {
+        socklen_t optlen = sizeof(rcvbuf);
+        int old_size = 0;
+        ::getsockopt(socket_guard_.get(), SOL_SOCKET, SO_RCVBUF, &old_size, &optlen);
+        ::setsockopt(socket_guard_.get(), SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+        ::getsockopt(socket_guard_.get(), SOL_SOCKET, SO_RCVBUF, &rcvbuf, &optlen);
+        LOG_INFO("[MsgClient] TCP receive buffer: %d KB (requested: %d KB, system default: %d KB)",
+                 rcvbuf / 1024, 2097152 / 1024, old_size / 1024);
+    }
 
     // Connect
     rc = ::connect(socket_guard_.get(), result->ai_addr, result->ai_addrlen);

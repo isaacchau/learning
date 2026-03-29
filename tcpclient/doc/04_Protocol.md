@@ -194,7 +194,7 @@ Bytes: [78] [56] [34] [12]  (least significant first)
 static const uint32_t MAGIC_KEY = 0xCAFEBABE;
 static const size_t MIN_MSG_LEN = sizeof(TcpResponse) + sizeof(MsgHdr);  // 24
 static const size_t MAX_MSG_LEN = 65535;  // Fits in uint16_t
-static const size_t RECV_BUFFER_SIZE = 2097152;  // 2MB default (configurable)
+static const size_t RECV_BUFFER_SIZE = 65536;  // 64KB default (configurable)
 ```
 
 **Why MAX_MSG_LEN = 65535?**
@@ -209,11 +209,11 @@ if (resp.respLen < MIN_MSG_LEN || resp.respLen > MAX_MSG_LEN) { ... }
 
 While the `> MAX_MSG_LEN` check is currently redundant (a `uint16_t` cannot exceed 65535), it is intentionally kept as **future-proofing**. If the protocol is later updated to use `uint32_t` for larger messages, this check becomes meaningful immediately. Modern compilers optimize away the always-false branch anyway, so there's no runtime cost.
 
-**Why 2MB receive buffer?**
-- Reduces partial message copies for large messages (>16KB)
-- Amortizes syscall overhead over more data
-- Memory cost is acceptable on modern systems (2MB per connection)
-- Configurable via `APP_TCP_RECV_BUFFER_SIZE` env var if memory-constrained
+**Why 64KB receive buffer?**
+- Larger than max message size (64KB > 64KB-1 protocol limit)
+- Good balance between memory usage and syscall batching efficiency
+- Can hold multiple small messages in one recv() call
+- Configurable via `APP_TCP_RECV_BUFFER_SIZE` env var if needed
 
 ## Example Walkthrough
 

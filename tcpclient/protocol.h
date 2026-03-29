@@ -59,8 +59,9 @@ inline uint32_t getMagicKey() {
 static const size_t MIN_MSG_LEN = sizeof(TcpResponse) + sizeof(MsgHdr); // 24
 static const size_t MAX_MSG_LEN = 65535;
 
-// Receive buffer size (configurable via APP_TCP_RECV_BUFFER_SIZE env var).
-// Default: 2097152 (2MB). Must be >= MAX_MSG_LEN.
+// Application receive buffer size (configurable via APP_TCP_RECV_BUFFER_SIZE env var).
+// Default: 65536 (64KB). Must be >= MAX_MSG_LEN.
+// This is the user-space buffer for recv(), NOT the TCP socket buffer.
 inline size_t getRecvBufferSize() {
     const char* env = std::getenv("APP_TCP_RECV_BUFFER_SIZE");
     if (env) {
@@ -68,10 +69,10 @@ inline size_t getRecvBufferSize() {
             size_t size = static_cast<size_t>(std::stoul(env));
             if (size >= MAX_MSG_LEN) return size;
         } catch (...) {
-            // Fall through to default on parse error
+            // Fall through to default on error
         }
     }
-    return 2097152; // 2MB default
+    return 65536; // 64KB default (good for batching multiple small messages)
 }
 
 // ============================================================================

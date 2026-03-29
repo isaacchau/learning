@@ -303,8 +303,8 @@ TEST(protocol_magic_key) {
 }
 
 TEST(protocol_buffer_size) {
-    // Default receive buffer size (2MB)
-    ASSERT_EQ(2097152, getRecvBufferSize());
+    // Default receive buffer size (64KB)
+    ASSERT_EQ(65536, getRecvBufferSize());
     
     return true;
 }
