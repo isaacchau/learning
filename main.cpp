@@ -298,12 +298,12 @@ int main(int argc, char *argv[]) {
         LOG_INFO("[PoolStats] === Memory Pool Statistics ===");
         for (const auto& s : pool_stats) {
           LOG_INFO("[PoolStats] Size=%zuB allocated=%llu free=%zu in_use=%llu "
-                   "misses=%llu",
+                   "new_allocs=%llu",
                    s.block_size, 
                    (unsigned long long)s.total_allocated, 
                    s.free_count,
                    (unsigned long long)s.current_allocated, 
-                   (unsigned long long)s.pool_misses);
+                   (unsigned long long)s.new_allocs);
         }
         last_pool_print = now;
       }
