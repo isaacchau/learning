@@ -398,8 +398,16 @@ void MsgClient::ioLoop() {
         // Allocate initial receive buffer from pool
         auto recv_buf = pool_->allocate(getRecvBufferSize());
         if (!recv_buf) {
-            LOG_ERR("[MsgClient] Failed to allocate receive buffer - memory pool exhausted");
-            break;
+            LOG_ERR("[MsgClient] Failed to allocate receive buffer - memory pool exhausted, "
+                     "will retry connection...");
+            closeSocket();
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(current_reconnect_delay_ms_));
+            // Exponential backoff for allocation failures too
+            current_reconnect_delay_ms_ = std::min(
+                static_cast<int>(current_reconnect_delay_ms_ * Defaults::RECONNECT_BACKOFF_MULT),
+                Defaults::RECONNECT_MAX_MS);
+            continue;  // Retry outer loop - don't terminate thread
         }
         size_t recv_used = 0;
 
