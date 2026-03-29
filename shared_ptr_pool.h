@@ -69,7 +69,8 @@ public:
       for (size_t j = 0; j < config[i].initial_count; ++j) {
         classes_[i].free_list.push_back(Buffer::create(config[i].block_size));
         classes_[i].total_allocated.fetch_add(1, std::memory_order_relaxed);
-        classes_[i].current_allocated.fetch_add(1, std::memory_order_relaxed);
+        // Note: current_allocated is NOT incremented here because
+        // pre-allocated buffers start in the free list (not in use)
       }
     }
   }
@@ -113,9 +114,11 @@ public:
       
       buf = Buffer::create(classes_[cls].block_size);
       classes_[cls].total_allocated.fetch_add(1, std::memory_order_relaxed);
-      classes_[cls].current_allocated.fetch_add(1, std::memory_order_relaxed);
       classes_[cls].pool_misses.fetch_add(1, std::memory_order_relaxed);
     }
+
+    // Increment current allocated count (buffer is now in use)
+    classes_[cls].current_allocated.fetch_add(1, std::memory_order_relaxed);
 
     // Custom deleter returns buffer to pool (or destroys if pool is full)
     return std::shared_ptr<Buffer>(
