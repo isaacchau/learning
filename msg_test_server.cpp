@@ -2,6 +2,12 @@
 // Test server that generates configurable messages for the MsgClient.
 // Usage: ./msg_test_server [--port P] [--msg-size S] [--msg-rate R]
 // [--msg-count N]
+//
+// Interactive controls (while client connected):
+//   'u' - Increase send rate by 10%
+//   'd' - Decrease send rate by 10%
+//   'o' - Reset to original rate
+//   'q' - Quit server
 
 #include "log_msg.h"
 #include "protocol.h"
@@ -14,6 +20,7 @@
 #include <signal.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <termios.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -26,6 +33,9 @@
 #include <vector>
 
 static std::atomic<bool> g_shutdown(false);
+static std::atomic<int> g_msg_rate(0);        // Current send rate (dynamic)
+static std::atomic<int> g_original_rate(0);   // Original rate from args
+static std::atomic<bool> g_rate_changed(false); // Flag to notify main loop
 
 static void signalHandler(int) {
   g_shutdown.store(true, std::memory_order_release);
@@ -44,6 +54,91 @@ static bool sendAll(int fd, const void *data, size_t len) {
   return true;
 }
 
+// Set terminal to non-canonical mode for single character input
+static void setNonCanonicalMode(bool enable) {
+  static struct termios old_tio, new_tio;
+  static bool saved = false;
+  
+  if (enable) {
+    tcgetattr(STDIN_FILENO, &old_tio);
+    saved = true;
+    new_tio = old_tio;
+    new_tio.c_lflag &= ~(ICANON | ECHO);
+    new_tio.c_cc[VMIN] = 0;
+    new_tio.c_cc[VTIME] = 0;
+    tcsetattr(STDIN_FILENO, TCSANOW, &new_tio);
+  } else if (saved) {
+    tcsetattr(STDIN_FILENO, TCSANOW, &old_tio);
+  }
+}
+
+// Keyboard input thread for dynamic rate control
+static void keyboardInputThread() {
+  setNonCanonicalMode(true);
+  
+  char c;
+  while (!g_shutdown.load(std::memory_order_relaxed)) {
+    if (read(STDIN_FILENO, &c, 1) > 0) {
+      int current_rate = g_msg_rate.load(std::memory_order_relaxed);
+      int new_rate = current_rate;
+      
+      switch (c) {
+        case 'u':
+        case 'U':
+          // Increase by 10%
+          if (current_rate > 0) {
+            new_rate = static_cast<int>(current_rate * 1.1);
+          } else {
+            // If currently at max rate (0), set to a reasonable high value
+            new_rate = 10000;
+          }
+          g_msg_rate.store(new_rate, std::memory_order_relaxed);
+          g_rate_changed.store(true, std::memory_order_relaxed);
+          LOG_INFO("[Server] Rate increased: %d -> %d msgs/s", current_rate, new_rate);
+          break;
+          
+        case 'd':
+        case 'D':
+          // Decrease by 10%
+          if (current_rate > 0) {
+            new_rate = static_cast<int>(current_rate * 0.9);
+            if (new_rate < 1) new_rate = 1;
+            g_msg_rate.store(new_rate, std::memory_order_relaxed);
+            g_rate_changed.store(true, std::memory_order_relaxed);
+            LOG_INFO("[Server] Rate decreased: %d -> %d msgs/s", current_rate, new_rate);
+          } else {
+            LOG_INFO("[Server] Currently at max rate (0), cannot decrease");
+          }
+          break;
+          
+        case 'o':
+        case 'O':
+          // Reset to original
+          new_rate = g_original_rate.load(std::memory_order_relaxed);
+          g_msg_rate.store(new_rate, std::memory_order_relaxed);
+          g_rate_changed.store(true, std::memory_order_relaxed);
+          LOG_INFO("[Server] Rate reset to original: %d msgs/s", new_rate);
+          break;
+          
+        case 'q':
+        case 'Q':
+          LOG_INFO("[Server] Quit requested via keyboard");
+          g_shutdown.store(true, std::memory_order_release);
+          break;
+          
+        default:
+          // Ignore other keys
+          break;
+      }
+    }
+    
+    // Small sleep to prevent busy-waiting
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  
+  setNonCanonicalMode(false);
+}
+
 static void printUsage(const char *prog) {
   fprintf(stderr,
           "Usage: %s [options]\n"
@@ -52,7 +147,13 @@ static void printUsage(const char *prog) {
           "  --msg-size <bytes>  Body size         (default: 256)\n"
           "  --msg-rate <msgs/s> Send rate, 0=max  (default: 1000)\n"
           "  --msg-count <num>   Total to send, 0=inf (default: 0)\n"
-          "  -h, --help          Show this help\n",
+          "  -h, --help          Show this help\n"
+          "\n"
+          "Interactive controls (while client connected):\n"
+          "  'u' - Increase send rate by 10%%\n"
+          "  'd' - Decrease send rate by 10%%\n"
+          "  'o' - Reset to original rate\n"
+          "  'q' - Quit server\n",
           prog);
 }
 
@@ -98,6 +199,13 @@ int main(int argc, char *argv[]) {
     }
   }
 
+  // Set global rate variables for dynamic control
+  g_msg_rate.store(msg_rate, std::memory_order_relaxed);
+  g_original_rate.store(msg_rate, std::memory_order_relaxed);
+  
+  // Start keyboard input thread for dynamic rate control
+  std::thread kb_thread(keyboardInputThread);
+  
   LogMsg::getInstance().init(argv[0], nullptr);
 
   // Signal handling
@@ -154,6 +262,7 @@ int main(int argc, char *argv[]) {
            "  Rate:       %d msgs/s%s\n"
            "  Count:      %s\n"
            "===================\n"
+           "Interactive controls: 'u' = +10%%, 'd' = -10%%, 'o' = reset, 'q' = quit\n"
            "Waiting for client connection...",
            port, msg_size, total_msg_len, sizeof(TcpResponse), sizeof(MsgHdr),
            msg_size, msg_rate, msg_rate == 0 ? " (max)" : "",
@@ -223,16 +332,29 @@ int main(int argc, char *argv[]) {
     // Send messages
     uint64_t seq = req.lastRespSeq + 1;
     uint64_t sent_count = 0;
+    int current_msg_rate = g_msg_rate.load(std::memory_order_relaxed);
 
     // Rate limiting: interval between messages
-    auto interval = (msg_rate > 0)
-                        ? std::chrono::nanoseconds(1000000000LL / msg_rate)
+    auto interval = (current_msg_rate > 0)
+                        ? std::chrono::nanoseconds(1000000000LL / current_msg_rate)
                         : std::chrono::nanoseconds(0);
 
     auto batch_start = std::chrono::steady_clock::now();
     uint64_t stats_last_seq = seq;
 
     while (!g_shutdown.load(std::memory_order_relaxed)) {
+      // Check if rate was changed via keyboard
+      if (g_rate_changed.load(std::memory_order_relaxed)) {
+        g_rate_changed.store(false, std::memory_order_relaxed);
+        current_msg_rate = g_msg_rate.load(std::memory_order_relaxed);
+        interval = (current_msg_rate > 0)
+                       ? std::chrono::nanoseconds(1000000000LL / current_msg_rate)
+                       : std::chrono::nanoseconds(0);
+        // Reset batch timing for smooth transition
+        batch_start = std::chrono::steady_clock::now();
+        sent_count = 0;
+      }
+      
       if (msg_count > 0 && sent_count >= msg_count) {
         LOG_INFO("Sent all %lu messages", msg_count);
         break;
@@ -263,7 +385,7 @@ int main(int argc, char *argv[]) {
       ++sent_count;
 
       // Rate limiting
-      if (msg_rate > 0 && interval.count() > 0) {
+      if (current_msg_rate > 0 && interval.count() > 0) {
         auto target = batch_start + interval * sent_count;
         auto now = std::chrono::steady_clock::now();
         if (now < target) {
@@ -276,8 +398,9 @@ int main(int argc, char *argv[]) {
         auto now = std::chrono::steady_clock::now();
         double elapsed =
             std::chrono::duration<double>(now - batch_start).count();
-        double rate = sent_count / elapsed;
-        LOG_INFO("[Server] sent=%lu rate=%.0f msgs/s", sent_count, rate);
+        double actual_rate = sent_count / elapsed;
+        LOG_INFO("[Server] sent=%lu actual_rate=%.0f msgs/s target_rate=%d msgs/s", 
+                 sent_count, actual_rate, current_msg_rate);
       }
     }
 
@@ -285,6 +408,10 @@ int main(int argc, char *argv[]) {
     ::close(client_fd);
   }
 
+  // Signal keyboard thread to stop and wait for it
+  g_shutdown.store(true, std::memory_order_release);
+  kb_thread.join();
+  
   ::close(listen_fd);
   LOG_INFO("Server stopped.");
   LogMsg::getInstance().shutdown();
