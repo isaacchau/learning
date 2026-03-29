@@ -259,12 +259,45 @@ Shows how many messages sent and current rate.
 
 ## Code Analysis
 
-To check for issues:
+### Basic Static Analysis
 ```bash
 make check
 ```
+This runs cppcheck if installed.
 
-This runs cppcheck (static analyzer) if installed.
+### Advanced Analysis (Optional Tools)
+
+For deeper analysis, use the separate `Makefile.analysis` (requires additional tools):
+
+```bash
+# Install tools (Ubuntu)
+sudo apt install clang clang-tidy valgrind
+
+# Build with AddressSanitizer (memory leak/overflow detection)
+make -f Makefile.analysis asan
+./msg_client_asan --host 127.0.0.1 --port 8888
+
+# Build with ThreadSanitizer (race condition detection for lock-free code)
+make -f Makefile.analysis tsan
+./msg_client_tsan --host 127.0.0.1 --port 8888
+
+# Run under Valgrind (detailed memory leak analysis)
+make -f Makefile.analysis valgrind
+
+# Run clang-tidy (modern C++ static analysis)
+make -f Makefile.analysis tidy
+```
+
+### When to Use Each Tool
+
+| Tool | Use For | Impact |
+|------|---------|--------|
+| **AddressSanitizer** | Memory leaks, buffer overflows | Fast runtime overhead |
+| **ThreadSanitizer** | Data races in lock-free queue | 5-15x slowdown |
+| **Valgrind** | Detailed memory analysis | 10-50x slowdown |
+| **clang-tidy** | Code style, modern C++ checks | Compile-time only |
+
+**Note:** Analysis tools are kept in a separate Makefile so the main build works on all systems.
 
 ## Next Steps
 
