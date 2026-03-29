@@ -297,13 +297,11 @@ int main(int argc, char *argv[]) {
         auto pool_stats = client.getPoolStats();
         LOG_INFO("[PoolStats] === Memory Pool Statistics ===");
         for (const auto& s : pool_stats) {
-          LOG_INFO("[PoolStats] Size=%zuB allocated=%llu free=%zu in_use=%llu "
-                   "new_allocs=%llu",
-                   s.block_size, 
-                   (unsigned long long)s.total_allocated, 
+          LOG_INFO("[PoolStats] Size=%zuB allocated=%llu free=%zu in_use=%llu",
+                   s.block_size,
+                   (unsigned long long)s.total_allocated,
                    s.free_count,
-                   (unsigned long long)s.current_allocated, 
-                   (unsigned long long)s.new_allocs);
+                   (unsigned long long)s.current_allocated);
         }
         last_pool_print = now;
       }

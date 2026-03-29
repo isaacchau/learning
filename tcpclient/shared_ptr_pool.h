@@ -114,7 +114,6 @@ public:
       
       buf = Buffer::create(classes_[cls].block_size);
       classes_[cls].total_allocated.fetch_add(1, std::memory_order_relaxed);
-      classes_[cls].new_allocs.fetch_add(1, std::memory_order_relaxed);
     }
 
     // Increment current allocated count (buffer is now in use)
@@ -132,7 +131,6 @@ public:
     uint64_t total_allocated;
     uint64_t total_returned;
     uint64_t current_allocated;
-    uint64_t new_allocs;  // Buffers newly allocated from OS (not from pool)
     size_t free_count;
   };
 
@@ -149,7 +147,6 @@ public:
           classes_[i].total_returned.load(std::memory_order_relaxed);
       s.current_allocated =
           classes_[i].current_allocated.load(std::memory_order_relaxed);
-      s.new_allocs = classes_[i].new_allocs.load(std::memory_order_relaxed);
       {
         std::lock_guard<std::mutex> lock(classes_[i].mutex);
         s.free_count = classes_[i].free_list.size();
@@ -168,7 +165,6 @@ private:
     mutable std::mutex mutex;
     std::atomic<uint64_t> total_allocated{0};
     std::atomic<uint64_t> total_returned{0};
-    std::atomic<uint64_t> new_allocs{0};  // Buffers newly allocated from OS (not from pool)
     std::atomic<uint64_t> current_allocated{0};  // Currently in use
   };
 
