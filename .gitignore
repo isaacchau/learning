@@ -1,6 +1,20 @@
-cppcheck_output.txt
+# Build outputs
 msg_client
 msg_test_server
 test_runner
 *.o
+
+# Analysis tool outputs (from Makefile.analysis)
+msg_client_asan
+msg_client_tsan
+msg_client_ubsan
+valgrind.log
+clang-tidy.log
+scan-build.log
+scan-results/
+
+# Static analysis outputs
+cppcheck_output.txt
+
+# Log files
 log/*
