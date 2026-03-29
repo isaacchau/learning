@@ -19,7 +19,9 @@ struct Buffer {
   // Factory: allocate a Buffer with `cap` bytes of data space
   static Buffer *create(size_t cap) {
     size_t alloc = offsetof(Buffer, data) + cap;
-    char *raw = new char[alloc];
+    // Note: new[]() with parentheses zero-initializes all bytes
+    // This ensures buffers start clean (security - no garbage data)
+    char *raw = new char[alloc]();
     Buffer *buf = reinterpret_cast<Buffer *>(raw);
     buf->capacity = cap;
     return buf;
