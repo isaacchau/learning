@@ -5,7 +5,9 @@
 You need:
 - **g++** (GCC) version 5.0 or higher (for C++14 support)
 - **Make** utility
-- Linux environment (uses `poll`, `socket`, `epoll`-style APIs)
+- **Linux** (RHEL 8/9, Ubuntu, etc.) - uses `epoll` for high-performance I/O
+
+**Note:** This program uses Linux-specific `epoll` API for efficient multi-connection handling. It will not compile on macOS or Windows.
 
 Check your g++ version:
 ```bash

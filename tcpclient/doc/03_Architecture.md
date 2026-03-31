@@ -59,11 +59,11 @@ This program uses a **pipeline pattern** - like an assembly line in a factory. E
 
 ## Stage 1: IO Thread (Multiple Connections → Raw Queue)
 
-**Job:** Manage multiple TCP sockets and read bytes from all of them.
+**Job:** Manage multiple TCP sockets and read bytes from all of them using **epoll** (Linux).
 
 ```cpp
 void ioLoop() {
-    // Manage all connections in a single loop
+    // Manage all connections using epoll for O(1) event notification
     while (running) {
         // 1. Connect any disconnected connections
         for each connection {
@@ -73,11 +73,12 @@ void ioLoop() {
             }
         }
         
-        // 2. Poll all connected sockets
-        poll(fds, num_connections, timeout);  // Wait for data on any socket
+        // 2. Wait for events using epoll (O(1) - only ready sockets returned)
+        int n = epoll_wait(epoll_fd, events, max_events, timeout);
         
-        // 3. Process ready sockets
-        for each ready socket {
+        // 3. Process ready sockets (only the ones with data)
+        for (int i = 0; i < n; i++) {
+            conn_idx = events[i].data.u32;    // Get connection index
             n = recv(socket, buffer, size);   // Read from network
             
             // Parse complete messages from buffer
@@ -94,15 +95,29 @@ void ioLoop() {
                 }
             }
         }
+        
+        // 4. Check idle timeout for all connected connections
     }
 }
 ```
 
 **Key concepts:**
-- **Single IO thread manages all sockets** using `poll()`
+- **Single IO thread manages all sockets** using `epoll()` (Linux)
+- **O(1) event notification**: epoll only returns ready sockets, no scanning
 - **Per-connection state**: Each connection has its own socket, reconnect delay, sequence tracking
 - **Independent reconnection**: One connection dropping doesn't block others
 - **Zero-copy**: Messages share buffers via `shared_ptr`
+
+**Why epoll instead of poll?**
+
+| Aspect | poll() | epoll() |
+|--------|--------|---------|
+| Complexity | O(n) - scans all FDs | O(1) - only ready FDs |
+| CPU usage | Higher (scans every call) | Lower (event-driven) |
+| Latency | Higher (periodic scan) | Lower (immediate wake) |
+| Scalability | Good for < 100 FDs | Good for 1000+ FDs |
+
+For tick-by-tick market data, epoll provides lower latency and better CPU efficiency.
 
 **Per-Connection Reconnection:**
 
