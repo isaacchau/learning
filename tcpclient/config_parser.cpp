@@ -3,8 +3,153 @@
 #include "log_msg.h"
 #include <fstream>
 #include <sstream>
+#include <algorithm>
 
 using json = nlohmann::json;
+
+// Helper validation functions
+namespace {
+    
+    bool validateRange(const std::string& name, size_t value, size_t min, size_t max, 
+                       std::string& error) {
+        if (value < min || value > max) {
+            error = name + " must be between " + std::to_string(min) + 
+                    " and " + std::to_string(max) + " (got " + std::to_string(value) + ")";
+            return false;
+        }
+        return true;
+    }
+    
+    bool validateRangeInt(const std::string& name, int value, int min, int max, 
+                          std::string& error) {
+        if (value < min || value > max) {
+            error = name + " must be between " + std::to_string(min) + 
+                    " and " + std::to_string(max) + " (got " + std::to_string(value) + ")";
+            return false;
+        }
+        return true;
+    }
+    
+    bool validateNotEmpty(const std::string& name, const std::string& value, 
+                          std::string& error) {
+        if (value.empty()) {
+            error = name + " cannot be empty";
+            return false;
+        }
+        return true;
+    }
+    
+    bool validateMaxLength(const std::string& name, const std::string& value, 
+                           size_t max_len, std::string& error) {
+        if (value.length() > max_len) {
+            error = name + " too long (max " + std::to_string(max_len) + 
+                    " chars, got " + std::to_string(value.length()) + ")";
+            return false;
+        }
+        return true;
+    }
+    
+    bool validateConfig(const MsgClientConfig& config, std::string& error) {
+        // Validate global settings
+        if (!validateRange("workers", config.worker_thread_count,
+                          Defaults::MIN_WORKER_THREADS, Defaults::MAX_WORKER_THREADS, error)) {
+            return false;
+        }
+        
+        if (!validateRange("raw_queue_size", config.raw_queue_size,
+                          Defaults::MIN_QUEUE_SIZE, Defaults::MAX_QUEUE_SIZE, error)) {
+            return false;
+        }
+        
+        if (!validateRange("decoded_queue_size", config.decoded_queue_size,
+                          Defaults::MIN_QUEUE_SIZE, Defaults::MAX_QUEUE_SIZE, error)) {
+            return false;
+        }
+        
+        if (!validateRangeInt("reconnect_interval_ms", config.reconnect_interval_ms,
+                             Defaults::MIN_RECONNECT_MS, Defaults::MAX_RECONNECT_MS, error)) {
+            return false;
+        }
+        
+        if (!validateRangeInt("queue_push_timeout_ms", config.queue_push_timeout_ms,
+                             Defaults::MIN_QUEUE_PUSH_TIMEOUT_MS, Defaults::MAX_QUEUE_PUSH_TIMEOUT_MS, error)) {
+            return false;
+        }
+        
+        // Validate connection count
+        if (config.connections.empty()) {
+            error = "At least one connection must be configured";
+            return false;
+        }
+        
+        if (config.connections.size() > Defaults::MAX_CONNECTIONS) {
+            error = "Too many connections (max " + std::to_string(Defaults::MAX_CONNECTIONS) + 
+                    ", got " + std::to_string(config.connections.size()) + ")";
+            return false;
+        }
+        
+        // Validate each connection
+        for (size_t i = 0; i < config.connections.size(); ++i) {
+            const auto& conn = config.connections[i];
+            std::string prefix = "connections[" + std::to_string(i) + "]";
+            
+            if (!validateNotEmpty(prefix + ".host", conn.host, error)) {
+                return false;
+            }
+            
+            if (!validateRangeInt(prefix + ".port", conn.port,
+                                 Defaults::MIN_PORT, Defaults::MAX_PORT, error)) {
+                return false;
+            }
+            
+            if (!validateNotEmpty(prefix + ".item_name", conn.item_name, error)) {
+                return false;
+            }
+            
+            if (!validateMaxLength(prefix + ".item_name", conn.item_name,
+                                  Defaults::MAX_ITEM_NAME_LEN, error)) {
+                return false;
+            }
+            
+            if (!validateNotEmpty(prefix + ".client_id", conn.client_id, error)) {
+                return false;
+            }
+            
+            if (!validateMaxLength(prefix + ".client_id", conn.client_id,
+                                  Defaults::MAX_CLIENT_ID_LEN, error)) {
+                return false;
+            }
+        }
+        
+        // Validate memory pool config (if provided)
+        if (!config.pool_config.empty()) {
+            if (config.pool_config.size() != MemoryPool::NUM_SIZE_CLASSES) {
+                error = "Memory pool must have exactly " + 
+                        std::to_string(MemoryPool::NUM_SIZE_CLASSES) + " size classes";
+                return false;
+            }
+            
+            for (size_t i = 0; i < config.pool_config.size(); ++i) {
+                const auto& cls = config.pool_config[i];
+                std::string prefix = "memory_pool.class_" + std::to_string(i);
+                
+                if (cls.initial_count > cls.max_total_allocated) {
+                    error = prefix + ".initial (" + std::to_string(cls.initial_count) + 
+                            ") cannot exceed max_total (" + std::to_string(cls.max_total_allocated) + ")";
+                    return false;
+                }
+                
+                if (cls.max_count > cls.max_total_allocated) {
+                    error = prefix + ".max_free (" + std::to_string(cls.max_count) + 
+                            ") cannot exceed max_total (" + std::to_string(cls.max_total_allocated) + ")";
+                    return false;
+                }
+            }
+        }
+        
+        return true;
+    }
+}
 
 bool parseConfigFile(const std::string& filepath, 
                      MsgClientConfig& config, 
@@ -25,52 +170,98 @@ bool parseConfigFile(const std::string& filepath,
         return false;
     }
 
+    // Validate JSON types before parsing
+    if (j.contains("global") && !j["global"].is_object()) {
+        error_message = "'global' must be an object";
+        return false;
+    }
+    
+    if (j.contains("connections") && !j["connections"].is_array()) {
+        error_message = "'connections' must be an array";
+        return false;
+    }
+    
+    if (j.contains("memory_pool") && !j["memory_pool"].is_object()) {
+        error_message = "'memory_pool' must be an object";
+        return false;
+    }
+
     // Parse global settings
     if (j.contains("global")) {
         const auto& global = j["global"];
         
-        if (global.contains("workers")) {
-            config.worker_thread_count = global["workers"].get<size_t>();
-        }
-        if (global.contains("raw_queue_size")) {
-            config.raw_queue_size = global["raw_queue_size"].get<size_t>();
-        }
-        if (global.contains("decoded_queue_size")) {
-            config.decoded_queue_size = global["decoded_queue_size"].get<size_t>();
-        }
-        if (global.contains("reconnect_interval_ms")) {
-            config.reconnect_interval_ms = global["reconnect_interval_ms"].get<int>();
-        }
-        if (global.contains("queue_push_timeout_ms")) {
-            config.queue_push_timeout_ms = global["queue_push_timeout_ms"].get<int>();
+        try {
+            if (global.contains("workers")) {
+                config.worker_thread_count = global["workers"].get<size_t>();
+            }
+            if (global.contains("raw_queue_size")) {
+                config.raw_queue_size = global["raw_queue_size"].get<size_t>();
+            }
+            if (global.contains("decoded_queue_size")) {
+                config.decoded_queue_size = global["decoded_queue_size"].get<size_t>();
+            }
+            if (global.contains("reconnect_interval_ms")) {
+                config.reconnect_interval_ms = global["reconnect_interval_ms"].get<int>();
+            }
+            if (global.contains("queue_push_timeout_ms")) {
+                config.queue_push_timeout_ms = global["queue_push_timeout_ms"].get<int>();
+            }
+        } catch (const json::type_error& e) {
+            error_message = std::string("Type error in 'global' section: ") + e.what();
+            return false;
         }
     }
 
     // Parse connections
     if (j.contains("connections")) {
         const auto& connections = j["connections"];
-        if (!connections.is_array()) {
-            error_message = "'connections' must be an array";
-            return false;
-        }
 
-        for (const auto& conn : connections) {
+        for (size_t i = 0; i < connections.size(); ++i) {
+            const auto& conn = connections[i];
+            
+            if (!conn.is_object()) {
+                error_message = "connections[" + std::to_string(i) + "] must be an object";
+                return false;
+            }
+            
             ConnectionConfig conn_config;
             
-            if (conn.contains("host")) {
-                conn_config.host = conn["host"].get<std::string>();
-            }
-            if (conn.contains("port")) {
-                conn_config.port = conn["port"].get<uint16_t>();
-            }
-            if (conn.contains("item")) {
-                conn_config.item_name = conn["item"].get<std::string>();
-            }
-            if (conn.contains("client_id")) {
-                conn_config.client_id = conn["client_id"].get<std::string>();
-            }
-            if (conn.contains("starting_seq")) {
-                conn_config.starting_seq_num = conn["starting_seq"].get<uint64_t>();
+            try {
+                if (conn.contains("host")) {
+                    if (!conn["host"].is_string()) {
+                        error_message = "connections[" + std::to_string(i) + "].host must be a string";
+                        return false;
+                    }
+                    conn_config.host = conn["host"].get<std::string>();
+                }
+                if (conn.contains("port")) {
+                    int port_val = conn["port"].get<int>();
+                    if (!validateRangeInt("connections[" + std::to_string(i) + "].port", 
+                                         port_val, Defaults::MIN_PORT, Defaults::MAX_PORT, error_message)) {
+                        return false;
+                    }
+                    conn_config.port = static_cast<uint16_t>(port_val);
+                }
+                if (conn.contains("item")) {
+                    if (!conn["item"].is_string()) {
+                        error_message = "connections[" + std::to_string(i) + "].item must be a string";
+                        return false;
+                    }
+                    conn_config.item_name = conn["item"].get<std::string>();
+                }
+                if (conn.contains("client_id")) {
+                    if (!conn["client_id"].is_string()) {
+                        error_message = "connections[" + std::to_string(i) + "].client_id must be a string";
+                        return false;
+                    }
+                    conn_config.client_id = conn["client_id"].get<std::string>();
+                }
+                if (conn.contains("starting_seq")) {
+                    conn_config.starting_seq_num = conn["starting_seq"].get<uint64_t>();
+                }
+            } catch (const json::type_error& e) {
+                error_message = "Type error in connections[" + std::to_string(i) + "]: " + e.what();
+                return false;
             }
 
             config.connections.push_back(conn_config);
@@ -106,13 +297,28 @@ bool parseConfigFile(const std::string& filepath,
             std::string key = "class_" + std::to_string(i);
             if (pool.contains(key)) {
                 const auto& cls = pool[key];
-                if (cls.contains("initial")) cfg.initial_count = cls["initial"].get<size_t>();
-                if (cls.contains("max_free")) cfg.max_count = cls["max_free"].get<size_t>();
-                if (cls.contains("max_total")) cfg.max_total_allocated = cls["max_total"].get<size_t>();
+                if (!cls.is_object()) {
+                    error_message = "memory_pool." + key + " must be an object";
+                    return false;
+                }
+                
+                try {
+                    if (cls.contains("initial")) cfg.initial_count = cls["initial"].get<size_t>();
+                    if (cls.contains("max_free")) cfg.max_count = cls["max_free"].get<size_t>();
+                    if (cls.contains("max_total")) cfg.max_total_allocated = cls["max_total"].get<size_t>();
+                } catch (const json::type_error& e) {
+                    error_message = "Type error in memory_pool." + key + ": " + e.what();
+                    return false;
+                }
             }
 
             config.pool_config.push_back(cfg);
         }
+    }
+
+    // Final validation of the complete configuration
+    if (!validateConfig(config, error_message)) {
+        return false;
     }
 
     return true;
@@ -126,21 +332,21 @@ void printConfigFormat() {
         "{\n"
         "  // Global settings\n"
         "  \"global\": {\n"
-        "    \"workers\": 4,                    // Number of worker threads\n"
-        "    \"raw_queue_size\": 16384,         // Raw queue size\n"
-        "    \"decoded_queue_size\": 16384,     // Decoded queue per worker\n"
-        "    \"reconnect_interval_ms\": 3000,   // Reconnect interval\n"
-        "    \"queue_push_timeout_ms\": 5       // Queue push timeout\n"
+        "    \"workers\": 4,                    // Number of worker threads (1-64)\n"
+        "    \"raw_queue_size\": 16384,         // Raw queue size (64-1048576)\n"
+        "    \"decoded_queue_size\": 16384,     // Decoded queue per worker (64-1048576)\n"
+        "    \"reconnect_interval_ms\": 3000,   // Reconnect interval (100-300000)\n"
+        "    \"queue_push_timeout_ms\": 5       // Queue push timeout (-1-60000)\n"
         "  },\n"
         "\n"
         "  // TCP connections (up to 64)\n"
         "  \"connections\": [\n"
         "    {\n"
         "      \"host\": \"server1.example.com\",\n"
-        "      \"port\": 8888,\n"
-        "      \"item\": \"AAPL\",\n"
-        "      \"client_id\": \"Client1\",\n"
-        "      \"starting_seq\": 0\n"
+        "      \"port\": 8888,                 // Port (1-65535)\n"
+        "      \"item\": \"AAPL\",              // Item name (max 32 chars)\n"
+        "      \"client_id\": \"Client1\",      // Client ID (max 32 chars)\n"
+        "      \"starting_seq\": 0             // Starting sequence number\n"
         "    },\n"
         "    {\n"
         "      \"host\": \"server2.example.com\",\n"
@@ -154,14 +360,23 @@ void printConfigFormat() {
         "  // Optional: Memory pool tuning\n"
         "  \"memory_pool\": {\n"
         "    \"class_5\": {                    // 64KB class (recv buffers)\n"
-        "      \"initial\": 512,\n"
-        "      \"max_free\": 1024,\n"
-        "      \"max_total\": 8192\n"
+        "      \"initial\": 512,               // <= max_total\n"
+        "      \"max_free\": 1024,             // <= max_total\n"
+        "      \"max_total\": 8192             // Maximum allocations\n"
         "    }\n"
         "  }\n"
         "}\n"
         "\n"
         "All fields are optional. Missing fields use defaults.\n"
         "Connections can also be specified via command line.\n"
+        "\n"
+        "Validation Rules:\n"
+        "- workers: 1-64\n"
+        "- raw_queue_size, decoded_queue_size: 64-1048576\n"
+        "- reconnect_interval_ms: 100-300000 (0.1s to 5min)\n"
+        "- queue_push_timeout_ms: -1 to 60000 (-1=no wait, 0=forever)\n"
+        "- port: 1-65535\n"
+        "- item_name, client_id: non-empty, max 32 chars\n"
+        "- max_connections: 1-64\n"
     );
 }
