@@ -451,7 +451,7 @@ bool MsgClient::connectToServer(size_t conn_idx) {
     if (epoll_fd_ >= 0) {
         struct epoll_event ev;
         std::memset(&ev, 0, sizeof(ev));
-        ev.events = EPOLLIN | EPOLLPRI | EPOLLERR | EPOLLHUP;
+        ev.events = EPOLLIN | EPOLLPRI | EPOLLERR | EPOLLHUP | EPOLLRDHUP;
         ev.data.u32 = static_cast<uint32_t>(conn_idx);  // Store connection index
         if (::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, conn.socket_guard.get(), &ev) < 0) {
             LOG_ERR("[MsgClient][Conn %zu] Failed to add socket to epoll: %s",
@@ -616,9 +616,9 @@ void MsgClient::ioLoop() {
             ConnectionState& conn = *connections_[conn_idx];
             RecvState& recv_state = recv_states[conn_idx];
 
-            // Check for errors (EPOLLERR, EPOLLHUP)
-            if (events[eidx].events & (EPOLLERR | EPOLLHUP)) {
-                LOG_ERR("[MsgClient][Conn %zu] Socket error/hangup event", conn_idx);
+            // Check for errors (EPOLLERR, EPOLLHUP, EPOLLRDHUP)
+            if (events[eidx].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
+                LOG_INFO("[MsgClient][Conn %zu] Peer closed connection", conn_idx);
                 connected[conn_idx] = false;
                 closeConnection(conn_idx);
                 continue;
