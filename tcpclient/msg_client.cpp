@@ -12,7 +12,7 @@
 #include <netdb.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <poll.h>
+#include <sys/epoll.h>
 #include <signal.h>
 #include <errno.h>
 
@@ -162,6 +162,7 @@ ConnectionState::ConnectionState(const ConnectionConfig& cfg)
 MsgClient::MsgClient(const MsgClientConfig& config)
     : config_(config)
     , running_(false)
+    , epoll_fd_(-1)
 {
     // Clamp worker count
     if (config_.worker_thread_count < Defaults::MIN_WORKER_THREADS) {
@@ -192,6 +193,15 @@ MsgClient::MsgClient(const MsgClientConfig& config)
     for (size_t i = 0; i < config_.worker_thread_count; ++i) {
         decoded_queues_.emplace_back(
             new LockFreeRingBuffer<SubMessage>(config_.decoded_queue_size));
+    }
+    
+    // Create epoll instance for efficient multi-connection I/O
+    epoll_fd_ = ::epoll_create1(EPOLL_CLOEXEC);
+    if (epoll_fd_ < 0) {
+        LOG_ERR("[MsgClient] Failed to create epoll instance: %s", strerror(errno));
+        // We'll fall back to the non-epoll path in ioLoop if epoll_fd_ < 0
+    } else {
+        LOG_INFO("[MsgClient] Epoll instance created (fd=%d)", epoll_fd_);
     }
 }
 
@@ -292,6 +302,12 @@ void MsgClient::stop() {
     
     if (io_cancelled || decoder_cancelled) {
         LOG_WARN("[MsgClient] Some threads required force cancellation during shutdown.");
+    }
+    
+    // Close epoll instance
+    if (epoll_fd_ >= 0) {
+        ::close(epoll_fd_);
+        epoll_fd_ = -1;
     }
 }
 
@@ -430,6 +446,22 @@ bool MsgClient::connectToServer(size_t conn_idx) {
 
     LOG_INFO("[MsgClient][Conn %zu] Connected to %s:%u",
              conn_idx, conn.config.host.c_str(), conn.config.port);
+    
+    // Add socket to epoll for efficient I/O multiplexing
+    if (epoll_fd_ >= 0) {
+        struct epoll_event ev;
+        std::memset(&ev, 0, sizeof(ev));
+        ev.events = EPOLLIN | EPOLLPRI | EPOLLERR | EPOLLHUP;
+        ev.data.u32 = static_cast<uint32_t>(conn_idx);  // Store connection index
+        if (::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, conn.socket_guard.get(), &ev) < 0) {
+            LOG_ERR("[MsgClient][Conn %zu] Failed to add socket to epoll: %s",
+                    conn_idx, strerror(errno));
+            conn.socket_guard.close();
+            return false;
+        }
+        LOG_DEBUG("[MsgClient][Conn %zu] Socket added to epoll", conn_idx);
+    }
+    
     return true;
 }
 
@@ -460,13 +492,17 @@ bool MsgClient::sendSubscription(size_t conn_idx) {
 
 void MsgClient::closeConnection(size_t conn_idx) {
     if (conn_idx < connections_.size()) {
+        // Remove from epoll before closing (ignore errors - socket might not be in epoll)
+        if (epoll_fd_ >= 0 && connections_[conn_idx]->socket_guard.valid()) {
+            ::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, connections_[conn_idx]->socket_guard.get(), nullptr);
+        }
         connections_[conn_idx]->socket_guard.close();
     }
 }
 
 void MsgClient::closeAllSockets() {
-    for (auto& conn : connections_) {
-        conn->socket_guard.close();
+    for (size_t i = 0; i < connections_.size(); ++i) {
+        closeConnection(i);
     }
 }
 
@@ -544,64 +580,52 @@ void MsgClient::ioLoop() {
             }
         }
 
-        // Build poll array for all connected sockets
-        std::vector<struct pollfd> pollfds;
-        std::vector<size_t> conn_indices;
-        
+        // Check if we have any connected sockets
+        bool has_connected = false;
         for (size_t i = 0; i < connections_.size(); ++i) {
             if (connected[i] && connections_[i]->socket_guard.valid()) {
-                struct pollfd pfd;
-                std::memset(&pfd, 0, sizeof(pfd));
-                pfd.fd = connections_[i]->socket_guard.get();
-                pfd.events = POLLIN;
-                pollfds.push_back(pfd);
-                conn_indices.push_back(i);
+                has_connected = true;
+                break;
             }
         }
 
-        if (pollfds.empty()) {
+        if (!has_connected) {
             // No connected sockets, wait a bit before retrying
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             continue;
         }
 
-        // Poll all sockets
-        int ret = ::poll(pollfds.data(), pollfds.size(), Defaults::POLL_TIMEOUT_MS);
+        // Wait for events using epoll
+        struct epoll_event events[Defaults::MAX_CONNECTIONS];
+        int ret = ::epoll_wait(epoll_fd_, events, Defaults::MAX_CONNECTIONS, Defaults::POLL_TIMEOUT_MS);
+        
         if (ret < 0) {
             if (errno == EINTR) continue;
-            LOG_ERR("[MsgClient] poll() error: %s", strerror(errno));
+            LOG_ERR("[MsgClient] epoll_wait() error: %s", strerror(errno));
             // Mark all as disconnected to retry
             std::fill(connected.begin(), connected.end(), false);
             closeAllSockets();
             continue;
         }
 
-        // Process each socket
-        for (size_t pidx = 0; pidx < pollfds.size(); ++pidx) {
-            size_t conn_idx = conn_indices[pidx];
+        // Process each event (ret = number of ready sockets)
+        for (int eidx = 0; eidx < ret; ++eidx) {
+            size_t conn_idx = events[eidx].data.u32;
+            if (conn_idx >= connections_.size()) continue;
+            
             ConnectionState& conn = *connections_[conn_idx];
             RecvState& recv_state = recv_states[conn_idx];
 
-            if (pollfds[pidx].revents & (POLLERR | POLLHUP | POLLNVAL)) {
-                LOG_ERR("[MsgClient][Conn %zu] Socket error event", conn_idx);
+            // Check for errors (EPOLLERR, EPOLLHUP)
+            if (events[eidx].events & (EPOLLERR | EPOLLHUP)) {
+                LOG_ERR("[MsgClient][Conn %zu] Socket error/hangup event", conn_idx);
                 connected[conn_idx] = false;
                 closeConnection(conn_idx);
                 continue;
             }
 
-            if (!(pollfds[pidx].revents & POLLIN)) {
-                // No data available on this socket
-                // Check for idle timeout
-                if (Defaults::CONN_IDLE_TIMEOUT_MS > 0) {
-                    auto idle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - conn.last_recv_time_).count();
-                    if (idle_ms > Defaults::CONN_IDLE_TIMEOUT_MS) {
-                        LOG_ERR("[MsgClient][Conn %zu] Connection idle for %ld ms (timeout: %d ms), forcing reconnect",
-                                conn_idx, idle_ms, Defaults::CONN_IDLE_TIMEOUT_MS);
-                        connected[conn_idx] = false;
-                        closeConnection(conn_idx);
-                    }
-                }
+            // Check if socket is readable
+            if (!(events[eidx].events & EPOLLIN)) {
                 continue;
             }
 
@@ -721,6 +745,24 @@ void MsgClient::ioLoop() {
                     continue;
                 }
                 recv_state.recv_used = 0;
+            }
+        }
+        
+        // Check idle timeout for all connected connections
+        // (epoll_wait timeout means no data on any socket)
+        if (Defaults::CONN_IDLE_TIMEOUT_MS > 0) {
+            auto now = std::chrono::steady_clock::now();
+            for (size_t i = 0; i < connections_.size(); ++i) {
+                if (connected[i]) {
+                    auto idle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - connections_[i]->last_recv_time_).count();
+                    if (idle_ms > Defaults::CONN_IDLE_TIMEOUT_MS) {
+                        LOG_ERR("[MsgClient][Conn %zu] Connection idle for %ld ms (timeout: %d ms), forcing reconnect",
+                                i, idle_ms, Defaults::CONN_IDLE_TIMEOUT_MS);
+                        connected[i] = false;
+                        closeConnection(i);
+                    }
+                }
             }
         }
     }

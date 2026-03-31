@@ -395,6 +395,9 @@ private:
 
     // Global statistics
     MsgClientStats stats_;
+    
+    // Epoll instance for efficient multi-connection I/O (Linux only)
+    int epoll_fd_;
 };
 
 #endif // MSG_CLIENT_H
