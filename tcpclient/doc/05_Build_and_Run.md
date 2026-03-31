@@ -41,14 +41,23 @@ make clean
 
 ## Running
 
-### Step 1: Start the Test Server
+### Step 1: Start the Test Server(s)
 
-In one terminal:
+For single connection testing:
 ```bash
 ./msg_test_server --port 8888 --msg-rate 1000 --msg-size 256
 ```
 
-Options:
+For multi-connection testing (two servers on different ports):
+```bash
+# Terminal 1
+./msg_test_server --port 8888 --msg-rate 1000
+
+# Terminal 2
+./msg_test_server --port 8889 --msg-rate 1000
+```
+
+Server options:
 - `--port`: Port to listen on (default: 8888)
 - `--msg-rate`: Messages per second, 0 = unlimited (default: 1000)
 - `--msg-size`: Body size in bytes (default: 256)
@@ -56,43 +65,77 @@ Options:
 
 ### Step 2: Run the Client
 
-In another terminal:
+#### Single Connection (Backward Compatible)
+
 ```bash
 ./msg_client --host 127.0.0.1 --port 8888 --item default --workers 2
 ```
 
-Options:
-- `--host`: Server address (default: 127.0.0.1)
-- `--port`: Server port (default: 8888)
-- `--item`: Item to subscribe to (default: "default")
-- `--seq`: Starting sequence number (default: 0)
-- `--workers`: Number of worker threads (default: 2, range: 1-64)
-- `--raw-queue`: Size of raw queue (default: 16384, range: 64-1048576)
-- `--dec-queue`: Size of decoded queue per worker (default: 16384, range: 64-1048576)
-- `--reconnect`: Reconnect interval in ms (default: 3000, range: 100-300000)
-- `--queue-timeout`: Queue push timeout in ms (default: 5, -1=no wait, 0=wait forever)
-- `--stats-interval`: Statistics print interval in seconds (default: 5)
-- `--log-dir`: Directory for log files (default: ./log)
-- `--log-stdout`: STDOUT log level (default: 6/INFO, 0-7)
-- `--log-file`: File log level (default: 7/DEBUG, 0-7)
-- `--log-syslog`: Syslog log level (default: 5/NOTICE, 0-7)
+#### Multiple Connections
+
+**Different servers, same item:**
+```bash
+./msg_client \
+  --host server1 --port 8888 --item AAPL --client-id Client1 \
+  --host server2 --port 8889 --item AAPL --client-id Client2 \
+  --workers 4
+```
+
+**Same server, different items:**
+```bash
+./msg_client \
+  --host 127.0.0.1 --port 8888 --item AAPL --client-id ClientA \
+  --host 127.0.0.1 --port 8888 --item MSFT --client-id ClientB \
+  --workers 4
+```
+
+**Multiple markets with different starting sequences:**
+```bash
+./msg_client \
+  --host nyse.primary --port 8888 --item AAPL --seq 1000000 \
+  --host nyse.backup  --port 8889 --item AAPL --seq 1000000 \
+  --host nasdaq.feed  --port 8890 --item MSFT --seq 500000 \
+  --workers 8
+```
+
+### Connection Options
+
+| Option | Description | Per-Connection | Default |
+|--------|-------------|----------------|---------|
+| `--host` | Server hostname/IP | ✅ Yes | 127.0.0.1 |
+| `--port` | Server port | ✅ Yes | 8888 |
+| `--item` | Subscription item name | ✅ Yes | "default" |
+| `--client-id` | Client identifier | ✅ Yes | "MsgClient" |
+| `--seq` | Starting sequence number | ✅ Yes | 0 |
+| `--workers` | Worker thread count | ❌ Global | 2 |
+| `--raw-queue` | Raw queue size | ❌ Global | 16384 |
+| `--dec-queue` | Decoded queue per worker | ❌ Global | 16384 |
+| `--reconnect` | Reconnect interval (ms) | ❌ Global | 3000 |
+| `--queue-timeout` | Queue push timeout (ms) | ❌ Global | 5 |
+| `--stats-interval` | Stats print interval (s) | ❌ Global | 5 |
+| `--log-dir` | Log directory | ❌ Global | ./log |
+
+**How it works:** When you specify `--host`, `--port`, `--item`, `--client-id`, or `--seq`, you start a new connection specification. The next `--host` (or end of arguments) completes the previous connection and starts a new one.
 
 ### Using Environment Variables
 
-All options can also be set via environment variables:
-
-**Client connection settings:**
+**Global settings:**
 ```bash
-export APP_TCP_CLIENT_HOST="192.168.1.100"
-export APP_TCP_CLIENT_PORT="9999"
-export APP_TCP_CLIENT_ITEM="mydata"
-export APP_TCP_CLIENT_SEQ="0"
 export APP_TCP_CLIENT_WORKERS="4"
 export APP_TCP_CLIENT_RAW_QUEUE="16384"
 export APP_TCP_CLIENT_DEC_QUEUE="16384"
 export APP_TCP_CLIENT_RECONNECT="3000"
 export APP_TCP_CLIENT_QUEUE_TIMEOUT="5"
 export APP_TCP_CLIENT_STATS_INTERVAL="5"
+```
+
+**Default connection settings (used when not specified on command line):**
+```bash
+export APP_TCP_CLIENT_HOST="192.168.1.100"
+export APP_TCP_CLIENT_PORT="9999"
+export APP_TCP_CLIENT_ITEM="mydata"
+export APP_TCP_CLIENT_CLIENT_ID="MyClient"
+export APP_TCP_CLIENT_SEQ="0"
 ```
 
 **Logging settings:**
@@ -137,31 +180,48 @@ export APP_TCP_MAGIC_KEY="0xDEADBEEF"    # Override protocol magic key
 export APP_TCP_RECV_BUFFER_SIZE="131072" # Override application receive buffer size (default: 64KB, min: 64KB)
 ```
 
-### Reconnection Behavior
+### Per-Connection Reconnection Behavior
 
-The client uses **exponential backoff** for reconnection attempts:
+Each connection has **independent auto-reconnection** with exponential backoff:
 - Initial delay: `--reconnect` value (default: 3000ms)
 - Backoff multiplier: 2x each failure
 - Maximum delay: 60 seconds
 - Resets to initial delay on successful connection
+- Each connection tracks its own retry count and delay
 
-Example sequence: 3s → 6s → 12s → 24s → 48s → 60s (cap) → 60s...
+Example sequence for a single connection: 3s → 6s → 12s → 24s → 48s → 60s (cap) → 60s...
 
-### Sequence Number Resume
+When Connection 0 drops, Connection 1 continues unaffected:
+```
+Time ──────────────────────────────────────────────►
 
-When reconnecting, the client tells the server the **last received sequence number**, so the server can resume from where it left off instead of resending everything:
+Conn 0:  CONNECTED ──► DROP ──► retry 3s ──► retry 6s ──► CONNECTED
+                          ▲
+                          │ (independent)
+Conn 1:  CONNECTED ───────┴──────────────────────────────► CONNECTED
+```
+
+### Per-Connection Sequence Number Resume
+
+When reconnecting, each connection tells the server its **last received sequence number**, so the server can resume from where it left off:
 
 ```
-1. Client receives messages 1-1000
-2. Connection drops
-3. Client reconnects automatically
-4. Client sends: "I have up to seq 1000"
-5. Server resumes from seq 1001 (no duplicates!)
+Connection 0:
+  1. Receives messages 1-1000
+  2. Connection drops
+  3. Reconnects automatically
+  4. Sends: "I have up to seq 1000"
+  5. Server resumes from seq 1001
+
+Connection 1:
+  1. Receives messages 1-500
+  2. Connection drops
+  3. Reconnects automatically
+  4. Sends: "I have up to seq 500"
+  5. Server resumes from seq 501
 ```
 
-This is automatic - no action needed. The client tracks the highest sequence number received and uses it for all reconnection attempts.
-
-Environment variables take precedence over defaults but command-line arguments override environment variables.
+This is automatic and per-connection - no action needed.
 
 ### Log Levels
 
@@ -176,7 +236,7 @@ Environment variables take precedence over defaults but command-line arguments o
 
 ## Example Scenarios
 
-### High-Throughput Test
+### High-Throughput Single Connection
 
 ```bash
 # Terminal 1: Server at max speed
@@ -186,26 +246,53 @@ Environment variables take precedence over defaults but command-line arguments o
 ./msg_client --host 127.0.0.1 --port 8888 --workers 8
 ```
 
+### Multi-Market Data Aggregation
+
+```bash
+# Terminal 1: NYSE feed simulator
+./msg_test_server --port 8888 --msg-rate 10000
+
+# Terminal 2: NASDAQ feed simulator
+./msg_test_server --port 8889 --msg-rate 10000
+
+# Terminal 3: Client aggregating both feeds
+./msg_client \
+  --host 127.0.0.1 --port 8888 --item AAPL --client-id ClientA \
+  --host 127.0.0.1 --port 8889 --item MSFT --client-id ClientB \
+  --workers 8 --stats-interval 2
+```
+
 ### Simulating Network Issues
 
 ```bash
-# Start server, send 10000 messages at 100/sec
-./msg_test_server --port 8888 --msg-rate 100 --msg-count 10000
+# Start two servers
+./msg_test_server --port 8888 --msg-rate 100 &
+SERVER1=$!
+./msg_test_server --port 8889 --msg-rate 100 &
+SERVER2=$!
 
 # Client with 1-second reconnect interval
-./msg_client --host 127.0.0.1 --port 8888 --reconnect 1000
+./msg_client \
+  --host 127.0.0.1 --port 8888 --item A --reconnect 1000 \
+  --host 127.0.0.1 --port 8889 --item B --reconnect 1000
 
-# Then kill and restart the server to test reconnection
+# Kill one server - watch the other continue
+kill $SERVER1
+
+# Restart the server - watch it reconnect automatically
+./msg_test_server --port 8888 --msg-rate 100
 ```
 
-### Testing Sequence Numbers
+### Testing Per-Connection Sequence Numbers
 
 ```bash
 # Server
 ./msg_test_server --port 8888 --msg-rate 100
 
-# Client starting from sequence 500 (server should continue from there)
-./msg_client --host 127.0.0.1 --port 8888 --seq 500
+# Client starting from different sequences per connection
+./msg_client \
+  --host 127.0.0.1 --port 8888 --item A --seq 1000 \
+  --host 127.0.0.1 --port 8888 --item B --seq 500
 ```
 
 ## Running in Background (Production Deployment)
@@ -228,7 +315,10 @@ When you run a program via SSH and disconnect, it receives **SIGHUP** (hangup si
 
 ```bash
 # Start with nohup - ignores SIGHUP automatically
-nohup ./msg_client --host server --workers 4 > client.log 2>&1 &
+nohup ./msg_client \
+    --host server1 --port 8888 --item A \
+    --host server2 --port 8889 --item B \
+    --workers 4 > client.log 2>&1 &
 
 # Output goes to nohup.out by default (or your redirect)
 # Safe to logout
@@ -267,9 +357,12 @@ exit
 
 ```bash
 # Create new session - fully detached from terminal
-setsid ./msg_client --host server --workers 4 \
-    > /var/log/msg_client.log \
-    2> /var/log/msg_client.err \
+setsid ./msg_client \
+    --host primary.server --port 8888 --item marketdata --client-id Primary \
+    --host backup.server --port 8889 --item marketdata --client-id Backup \
+    --workers 16 \
+    > /var/log/msg_client/stdout.log \
+    2> /var/log/msg_client/stderr.log \
     < /dev/null &
 
 # Process is now in its own session
@@ -317,14 +410,14 @@ nohup:                           setsid:
 ```bash
 # Using screen
 screen -S msgclient
-./msg_client --host server --workers 4
+./msg_client --host server1 --port 8888 --item A --host server2 --port 8889 --item B
 # Press Ctrl+A, then D to detach
 # Logout, come back later
 screen -r msgclient  # Reattach
 
 # Using tmux
 tmux new -s msgclient
-./msg_client --host server --workers 4
+./msg_client --host server1 --port 8888 --item A --host server2 --port 8889 --item B
 # Press Ctrl+B, then D to detach
 tmux attach -t msgclient  # Reattach
 ```
@@ -352,14 +445,15 @@ tmux attach -t msgclient  # Reattach
 LOG_DIR="/var/log/msgclient"
 mkdir -p "$LOG_DIR"
 
-# Fully detached daemon
+# Fully detached daemon with multiple market feeds
 setsid ./msg_client \
-    --host prod.trading.server \
-    --port 8888 \
-    --item marketdata \
+    --host nyse.primary --port 8888 --item AAPL --client-id ClientA \
+    --host nyse.backup --port 8889 --item AAPL --client-id ClientA \
+    --host nasdaq.feed --port 8890 --item MSFT --client-id ClientB \
     --workers 16 \
     --raw-queue 65536 \
     --dec-queue 65536 \
+    --reconnect 1000 \
     > "$LOG_DIR/stdout.log" \
     2> "$LOG_DIR/stderr.log" \
     < /dev/null &
@@ -372,17 +466,20 @@ echo "Client started, PID: $!"
 ### Client Statistics
 
 ```
-[Stats] recv=5000(+1000) decoded=5000 proc=5000(+
-1000) dropped=0 bytes=1280000(2.05 Mbps) reconnects=0 parse_err=0
+[Stats] recv=5000(+1000) decoded=5000 proc=5000(+1000) dropped=0 bytes=1280000(2.05 Mbps) reconnects=0 parse_err=0 conns=2
+[Conn 0] nyse.primary:8888 item='AAPL' recv=2500 bytes=640000 reconnects=0 (connected)
+[Conn 1] nasdaq.feed:8890 item='MSFT' recv=2500 bytes=640000 reconnects=0 (connected)
 ```
 
-- `recv`: Total messages received (+ since last report)
+- `recv`: Total messages received from all connections (+ since last report)
 - `decoded`: Total messages successfully parsed
 - `proc`: Total messages processed by workers
 - `dropped`: Messages dropped due to full queues
 - `bytes`: Total bytes received (+ throughput in Mbps)
-- `reconnects`: Number of reconnections
+- `reconnects`: Total reconnections across all connections
 - `parse_err`: Protocol parse errors
+- `conns`: Number of configured connections
+- Per-connection stats show: endpoint, item, messages received, bytes, reconnects, connection status
 
 ### Server Statistics
 
@@ -406,11 +503,19 @@ Shows how many messages sent and current rate.
 ### High CPU usage
 - Normal under high load (spin-waiting in queues)
 - Reduce `--msg-rate` or increase queue sizes
+- Ensure you have enough workers for your message rate
 
 ### Messages being dropped
-- Increase queue sizes: `--raw-queue 16384 --dec-queue 16384`
-- Add more workers: `--workers 4`
-- Check if handler is too slow
+- Increase queue sizes: `--raw-queue 65584 --dec-queue 65584`
+- Add more workers: `--workers 8`
+- Check if handler is too slow (use profiling)
+- Check per-connection stats to see if one connection is overwhelming others
+
+### One connection not receiving data
+- Check per-connection stats: `[Conn N]` lines in logs
+- Verify server is sending to that item name
+- Check network connectivity: `telnet host port`
+- Check firewall rules
 
 ## Performance Tuning
 
@@ -418,16 +523,32 @@ Shows how many messages sent and current rate.
 
 1. **Use release build** (`make`, not `make debug`)
 2. **Disable logging** or set high log levels
-3. **Increase queue sizes** to handle bursts
+3. **Increase queue sizes** to handle bursts: `--raw-queue 65536 --dec-queue 65536`
 4. **Match workers to CPU cores** (but leave one for IO)
 5. **Use larger message sizes** (less overhead per byte)
+6. **Multiple connections**: Spread load across connections if single connection is saturated
 
 ### For Minimum Latency
 
 1. **Keep queues small** (less buffering = lower latency)
-2. **Use single worker** (no context switching)
+2. **Use single worker** (no context switching) if processing is simple
 3. **Set CPU affinity** (not implemented here, but common optimization)
 4. **Disable Nagle's algorithm** (already done in code via `TCP_NODELAY`)
+5. **Fewer connections**: Each connection adds slight overhead in poll()
+
+### For Market Data (Tick-by-Tick)
+
+```bash
+# Recommended configuration for low-latency market data
+./msg_client \
+  --host feed1 --port 8888 --item AAPL \
+  --host feed2 --port 8889 --item AAPL \
+  --workers 4 \
+  --raw-queue 16384 \
+  --dec-queue 16384 \
+  --reconnect 1000 \
+  --queue-timeout 0  # Wait forever (don't drop market data)
+```
 
 ## Code Analysis
 
@@ -477,14 +598,21 @@ To customize the client for your needs:
 
 1. Edit `main.cpp` to set your own message handler:
 ```cpp
-client.setMessageHandler([](const SubMessage &msg, size_t worker_index) {
+client.setMessageHandler([](const SubMessage &msg, size_t worker_index, size_t connection_id) {
     // Your processing code here
     // msg.body points to the data
     // msg.body_length tells you how much data
     // msg.seq_num is the sequence number
+    // msg.connection_id tells you which connection (0, 1, 2, ...)
+    
+    // Example: Route by connection
+    switch (connection_id) {
+        case 0: process_nyse(msg); break;
+        case 1: process_nasdaq(msg); break;
+    }
 });
 ```
 
 2. Rebuild: `make`
 
-3. Run against your own server (that implements the same protocol)
+3. Run against your own servers (that implement the same protocol)

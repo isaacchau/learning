@@ -5,42 +5,92 @@
 This program uses a **pipeline pattern** - like an assembly line in a factory. Each stage does one thing and passes the result to the next stage.
 
 ```
-┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
-│ Network  │───►│   Raw    │───►│ Decoded  │───►│  Worker  │
-│  Socket  │    │  Queue   │    │  Queue   │    │ Threads  │
-└──────────┘    └──────────┘    └──────────┘    └──────────┘
-     │               │               │               │
-  IO Thread     Decoder Thread                  Worker Threads
-                                                    (1-N)
+                    Multiple Connections
+                    (up to 64 sockets)
+                           │
+         ┌─────────────────┼─────────────────┐
+         │                 │                 │
+         ▼                 ▼                 ▼
+   ┌──────────┐      ┌──────────┐      ┌──────────┐
+   │ Conn 1   │      │ Conn 2   │      │ Conn N   │
+   │ Socket   │      │ Socket   │      │ Socket   │
+   └────┬─────┘      └────┬─────┘      └────┬─────┘
+        │                 │                 │
+        └─────────────────┼─────────────────┘
+                          │
+                          ▼
+                   ┌────────────┐
+                   │  poll()    │  ◄── Single IO Thread
+                   │  (all FDs) │      manages all sockets
+                   └─────┬──────┘
+                         │
+        ┌────────────────┼────────────────┐
+        │                │                │
+        ▼                ▼                ▼
+  ┌──────────┐    ┌──────────┐    ┌──────────┐
+  │  Raw     │    │   Raw    │    │   Raw    │
+  │ Queue    │    │  Queue   │    │  Queue   │
+  │(Conn 1)  │    │(Conn 2)  │    │(Conn N)  │
+  └────┬─────┘    └────┬─────┘    └────┬─────┘
+       │               │               │
+       └───────────────┼───────────────┘
+                       │
+                       ▼
+              ┌────────────────┐
+              │ Decoder Thread │ ◄── Single decoder
+              │ (all conns)    │     parses all messages
+              └───────┬────────┘
+                      │
+       ┌──────────────┼──────────────┐
+       │              │              │
+       ▼              ▼              ▼
+ ┌──────────┐  ┌──────────┐  ┌──────────┐
+ │ Decoded  │  │ Decoded  │  │ Decoded  │
+ │ Queue 1  │  │ Queue 2  │  │ Queue M  │
+ │(Worker 1)│  │(Worker 2)│  │(Worker M)│
+ └────┬─────┘  └────┬─────┘  └────┬─────┘
+      │             │             │
+      ▼             ▼             ▼
+ ┌──────────┐  ┌──────────┐  ┌──────────┐
+ │ Worker   │  │ Worker   │  │ Worker   │
+ │ Thread 1 │  │ Thread 2 │  │ Thread M │
+ └──────────┘  └──────────┘  └──────────┘
 ```
 
-## Stage 1: IO Thread (Network → Raw Queue)
+## Stage 1: IO Thread (Multiple Connections → Raw Queue)
 
-**Job:** Read bytes from the TCP socket.
+**Job:** Manage multiple TCP sockets and read bytes from all of them.
 
 ```cpp
 void ioLoop() {
+    // Manage all connections in a single loop
     while (running) {
-        // 1. Connect to server (with auto-reconnect)
-        connectToServer();
+        // 1. Connect any disconnected connections
+        for each connection {
+            if (!connected[i]) {
+                connectToServer(i);           // Try to connect
+                // Per-connection exponential backoff on failure
+            }
+        }
         
-        // 2. Send subscription request
-        sendSubscription();  // "I want item 'default' starting from seq 0"
+        // 2. Poll all connected sockets
+        poll(fds, num_connections, timeout);  // Wait for data on any socket
         
-        // 3. Receive loop
-        while (running) {
-            n = recv(socket, buffer, size);  // Read from network
+        // 3. Process ready sockets
+        for each ready socket {
+            n = recv(socket, buffer, size);   // Read from network
             
             // Parse complete messages from buffer
             while (haveCompleteMessage) {
                 RawMessage raw;
-                raw.buffer = shared_buffer;  // Share the buffer (zero-copy)
+                raw.buffer = shared_buffer;    // Share the buffer (zero-copy)
                 raw.offset = message_start;
                 raw.length = message_length;
+                raw.connection_id = conn_idx;  // Track which connection
                 
                 // Push with timeout - drops message if queue is full
                 if (!raw_queue_->push_wait(std::move(raw), timeout_ms)) {
-                    stats_.messages_dropped++;  // Queue full, message dropped
+                    stats_.messages_dropped++;
                 }
             }
         }
@@ -48,10 +98,33 @@ void ioLoop() {
 }
 ```
 
-**Key concept: Zero-copy**
-Instead of copying message data, we share a reference to the buffer using `shared_ptr`. Multiple messages can reference different parts of the same buffer.
+**Key concepts:**
+- **Single IO thread manages all sockets** using `poll()`
+- **Per-connection state**: Each connection has its own socket, reconnect delay, sequence tracking
+- **Independent reconnection**: One connection dropping doesn't block others
+- **Zero-copy**: Messages share buffers via `shared_ptr`
+
+**Per-Connection Reconnection:**
+
+Each connection maintains its own reconnection state:
+```cpp
+struct ConnectionState {
+    SocketGuard socket;                    // Connection's socket
+    int reconnect_delay_ms;                // Current backoff (starts at 3000ms)
+    uint64_t last_received_seq;            // For resume on reconnect
+    uint64_t reconnect_count;              // Stats for this connection
+    // ...
+};
+```
+
+When a connection drops:
+1. Mark as disconnected
+2. Retry with exponential backoff (3s → 6s → 12s → ... → 60s)
+3. Other connections continue unaffected
+4. On reconnect, resume from last sequence number
 
 **Drop Strategy vs Backpressure**
+
 When queues are full, this system uses a **drop strategy** rather than backpressure:
 - **Backpressure** would stop receiving, causing TCP buffers to fill up
 - **Drop strategy** discards messages when queues are full
@@ -60,7 +133,7 @@ When queues are full, this system uses a **drop strategy** rather than backpress
 
 ## Stage 2: Decoder Thread (Raw Queue → Decoded Queues)
 
-**Job:** Parse binary data into structured messages and distribute to workers.
+**Job:** Parse binary data from all connections into structured messages and distribute to workers.
 
 ```cpp
 void decoderLoop() {
@@ -68,7 +141,7 @@ void decoderLoop() {
     RawMessage raw;
     
     while (running) {
-        // 1. Get raw message from IO thread
+        // 1. Get raw message from IO thread (any connection)
         if (!raw_queue_->pop_wait(raw)) continue;
         
         // 2. Parse the binary data
@@ -81,7 +154,8 @@ void decoderLoop() {
         sub.timestamp = hdr.timestamp;
         sub.body = raw.buffer->data + body_offset;
         sub.body_length = body_length;
-        sub.buffer = raw.buffer;  // Keep buffer alive
+        sub.buffer = raw.buffer;           // Keep buffer alive
+        sub.connection_id = raw.connection_id;  // Pass through connection ID
         
         // 4. Distribute round-robin to workers
         decoded_queues_[worker_idx]->push_wait(std::move(sub));
@@ -91,25 +165,25 @@ void decoderLoop() {
 ```
 
 **Why round-robin?**
-- Simple load balancing
+- Simple load balancing across all connections
 - Maintains order per worker (messages to same worker are in order)
 - No complex scheduling logic
 
 ## Stage 3: Worker Threads (Processing)
 
-**Job:** Do actual work with the message.
+**Job:** Do actual work with the message. The handler now receives `connection_id` to identify the source.
 
 ```cpp
 void workerLoop(size_t worker_index) {
     SubMessage msg;
     
     while (running) {
-        // 1. Get message from my personal queue
+        // 1. Get message from my personal queue (from any connection)
         if (!decoded_queues_[worker_index]->pop_wait(msg)) continue;
         
         // 2. Process (user-defined handler)
         if (handler_) {
-            handler_(msg, worker_index);
+            handler_(msg, worker_index, msg.connection_id);  // NEW: connection_id
         }
         
         // 3. Message destroyed here, shared_ptr decrements
@@ -120,9 +194,10 @@ void workerLoop(size_t worker_index) {
 
 **Default handler is empty** - you need to set your own:
 ```cpp
-client.setMessageHandler([](const SubMessage &msg, size_t worker_index) {
+client.setMessageHandler([](const SubMessage &msg, size_t worker_index, size_t connection_id) {
     // Your business logic here
-    std::cout << "Got message #" << msg.seq_num 
+    std::cout << "Got message from connection " << connection_id
+              << " seq=" << msg.seq_num 
               << " with " << msg.body_length << " bytes"
               << " on worker " << worker_index << std::endl;
 });
@@ -310,7 +385,7 @@ Threads use a **two-phase shutdown** strategy for safety:
 ```
 Phase 1: Graceful (0-30s)
   ├── Set running_=false
-  ├── Close socket (unblocks IO thread)
+  ├── Close all sockets (unblocks IO thread)
   └── Wait for threads to exit naturally
 
 Phase 2: Force Cancel (if needed, Linux only)
@@ -336,6 +411,7 @@ On non-Linux platforms, cancellation is not available, so we wait longer (60s) a
 | `decoded_queues_[i]` | Decoder (producer) + Worker i (consumer) | Lock-free SPSC queue |
 | `stats_` | All threads read/write | Atomic variables |
 | `pool_` | All threads allocate | Mutex per size class (acceptable contention) |
+| `connections_[i]` | IO thread only | No sharing needed |
 
 ### Statistics Counter Overflow
 
@@ -356,12 +432,46 @@ uint64_t delta = current - previous;  // Unsigned arithmetic wraps correctly
 ## Data Flow Summary
 
 ```
-Network ──► recv buffer ──► RawMessage ──► raw_queue ──►
-    (shared_ptr to buffer)
-
-raw_queue ──► SubMessage ──► decoded_queues[i] ──► handler
-    (same buffer shared,    (round-robin          (your code)
-     different offsets)      distribution)
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        MULTI-CONNECTION FLOW                            │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Conn 0 ──► recv buffer 0 ──► RawMessage (conn_id=0) ──┐               │
+│                                                        │               │
+│  Conn 1 ──► recv buffer 1 ──► RawMessage (conn_id=1) ──┼──► raw_queue  │
+│                                                        │               │
+│  Conn 2 ──► recv buffer 2 ──► RawMessage (conn_id=2) ──┘               │
+│                              (shared_ptr to buffer)                    │
+│                                                                         │
+│  raw_queue ──► SubMessage (with conn_id) ──► decoded_queues[i] ──► handler
+│                 (same buffer shared,         (round-robin)        (your code)
+│                  different offsets)                                    │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
 All stages run in parallel, connected by lock-free queues. No thread waits for another unless a queue is full/empty, and even then it's a spin-wait with backoff, not a mutex lock.
+
+## Configuration for Market Data
+
+For tick-by-tick market data scenarios:
+
+```cpp
+// Recommended settings for high-rate market data
+MsgClientConfig config;
+config.worker_thread_count = 4;        // Match CPU cores - 1 for IO
+config.raw_queue_size = 65536;          // Large queue for bursts
+config.decoded_queue_size = 65536;      // Per-worker large queue
+config.reconnect_interval_ms = 1000;    // Fast reconnect for critical data
+
+// Add multiple market connections
+config.addConnection("nyse.primary", 8888, "AAPL", "ClientA", 0);
+config.addConnection("nyse.backup", 8889, "AAPL", "ClientA", 0);   // Hot standby
+config.addConnection("nasdaq.primary", 8890, "MSFT", "ClientB", 0);
+```
+
+**Key considerations:**
+1. **Queue sizes**: Large enough to absorb microbursts but not so large that old data is stale
+2. **Worker threads**: Match your CPU cores (leave one for IO thread)
+3. **Per-connection resume**: Each connection tracks its own sequence number for seamless reconnect
+4. **Hot standby**: Connect to primary and backup feeds simultaneously
