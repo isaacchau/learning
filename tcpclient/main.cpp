@@ -1,5 +1,6 @@
 #include "log_msg.h"
 #include "msg_client.h"
+#include "config_parser.h"
 
 #include <atomic>
 #include <chrono>
@@ -30,6 +31,7 @@ static void printUsage(const char *prog) {
           "Usage: %s [options] [connection ...]\n"
           "\n"
           "Options:\n"
+          "  --config <file>      JSON configuration file (optional)\n"
           "  --workers <num>      Worker thread count   (default: %zu)\n"
           "  --raw-queue <size>   Raw queue size        (default: %zu)\n"
           "  --dec-queue <size>   Decoded queue size    (default: %zu)\n"
@@ -42,6 +44,7 @@ static void printUsage(const char *prog) {
           "  --log-stdout <lvl>   STDOUT log level      (default: 6/INFO)\n"
           "  --log-file <lvl>     FILE log level        (default: 7/DEBUG)\n"
           "  --log-syslog <lvl>   SYSLOG log level      (default: 5/NOTICE)\n"
+          "  --config-help        Show configuration file format\n"
           "  -h, --help           Show this help\n"
           "\n"
           "Connection Specification (can be specified multiple times):\n"
@@ -110,15 +113,39 @@ int main(int argc, char *argv[]) {
     return def;
   };
 
+  // First pass: check for --config argument
+  std::string config_file;
+  for (int i = 1; i < argc; ++i) {
+    if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
+      config_file = argv[i + 1];
+      break;
+    }
+  }
+
   // Build client configuration
   MsgClientConfig config;
   
-  // Global settings from environment
-  config.worker_thread_count  = static_cast<size_t>(getEnvInt("APP_TCP_CLIENT_WORKERS", Defaults::WORKER_THREAD_COUNT));
-  config.raw_queue_size       = static_cast<size_t>(getEnvInt("APP_TCP_CLIENT_RAW_QUEUE", Defaults::RAW_QUEUE_SIZE));
-  config.decoded_queue_size   = static_cast<size_t>(getEnvInt("APP_TCP_CLIENT_DEC_QUEUE", Defaults::DECODED_QUEUE_SIZE));
-  config.reconnect_interval_ms= getEnvInt("APP_TCP_CLIENT_RECONNECT", Defaults::RECONNECT_INTERVAL_MS);
-  config.queue_push_timeout_ms= getEnvInt("APP_TCP_CLIENT_QUEUE_TIMEOUT", Defaults::QUEUE_PUSH_TIMEOUT_MS);
+  // Load from config file if specified
+  if (!config_file.empty()) {
+    std::string error;
+    if (!parseConfigFile(config_file, config, error)) {
+      fprintf(stderr, "Error loading config file: %s\n", error.c_str());
+      return 1;
+    }
+    printf("Loaded configuration from: %s\n", config_file.c_str());
+  }
+  
+  // Global settings from environment (override config file defaults)
+  config.worker_thread_count  = static_cast<size_t>(getEnvInt("APP_TCP_CLIENT_WORKERS", 
+      config.worker_thread_count > 0 ? config.worker_thread_count : Defaults::WORKER_THREAD_COUNT));
+  config.raw_queue_size       = static_cast<size_t>(getEnvInt("APP_TCP_CLIENT_RAW_QUEUE", 
+      config.raw_queue_size > 0 ? config.raw_queue_size : Defaults::RAW_QUEUE_SIZE));
+  config.decoded_queue_size   = static_cast<size_t>(getEnvInt("APP_TCP_CLIENT_DEC_QUEUE", 
+      config.decoded_queue_size > 0 ? config.decoded_queue_size : Defaults::DECODED_QUEUE_SIZE));
+  config.reconnect_interval_ms= getEnvInt("APP_TCP_CLIENT_RECONNECT", 
+      config.reconnect_interval_ms > 0 ? config.reconnect_interval_ms : Defaults::RECONNECT_INTERVAL_MS);
+  config.queue_push_timeout_ms= getEnvInt("APP_TCP_CLIENT_QUEUE_TIMEOUT", 
+      config.queue_push_timeout_ms != 0 ? config.queue_push_timeout_ms : Defaults::QUEUE_PUSH_TIMEOUT_MS);
 
   int stats_interval_sec = getEnvInt("APP_TCP_CLIENT_STATS_INTERVAL", Defaults::STATS_INTERVAL_SEC);
   int pool_stats_interval_sec = 0;
@@ -127,7 +154,7 @@ int main(int argc, char *argv[]) {
   int log_file = -1;
   int log_syslog = -1;
 
-  // Connection being built
+  // Connection being built (CLI can add to config file connections)
   ConnectionConfig current_conn;
   current_conn.host = getEnvStr("APP_TCP_CLIENT_HOST", Defaults::HOST);
   current_conn.port = static_cast<uint16_t>(getEnvInt("APP_TCP_CLIENT_PORT", Defaults::PORT));
@@ -138,7 +165,13 @@ int main(int argc, char *argv[]) {
 
   // Parse command-line arguments
   for (int i = 1; i < argc; ++i) {
-    if ((strcmp(argv[i], "--host") == 0) && i + 1 < argc) {
+    if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
+      // Already handled in first pass
+      ++i;
+    } else if (strcmp(argv[i], "--config-help") == 0) {
+      printConfigFormat();
+      return 0;
+    } else if ((strcmp(argv[i], "--host") == 0) && i + 1 < argc) {
       // If we already have a connection building, save it and start a new one
       if (has_connection) {
         config.connections.push_back(current_conn);

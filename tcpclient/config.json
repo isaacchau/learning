@@ -1,0 +1,32 @@
+{
+  "global": {
+    "workers": 4,
+    "raw_queue_size": 32768,
+    "decoded_queue_size": 32768,
+    "reconnect_interval_ms": 3000,
+    "queue_push_timeout_ms": 5
+  },
+  "connections": [
+    {
+      "host": "127.0.0.1",
+      "port": 8888,
+      "item": "stocks",
+      "client_id": "ClientA",
+      "starting_seq": 0
+    },
+    {
+      "host": "127.0.0.1",
+      "port": 8889,
+      "item": "futures",
+      "client_id": "ClientB",
+      "starting_seq": 0
+    }
+  ],
+  "memory_pool": {
+    "class_5": {
+      "initial": 512,
+      "max_free": 1024,
+      "max_total": 8192
+    }
+  }
+}
