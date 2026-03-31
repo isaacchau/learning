@@ -119,6 +119,74 @@ Server options:
 
 **How it works:** When you specify `--host`, `--port`, `--item`, `--client-id`, or `--seq`, you start a new connection specification. The next `--host` (or end of arguments) completes the previous connection and starts a new one.
 
+### Configuration File (Recommended for Production)
+
+For complex setups with many connections, use a JSON configuration file:
+
+```bash
+# View configuration file format
+./msg_client --config-help
+
+# Run with configuration file
+./msg_client --config production.json
+
+# Override specific settings from config file
+./msg_client --config production.json --workers 8
+```
+
+**Example configuration file (`config.json`):**
+
+```json
+{
+  "global": {
+    "workers": 4,
+    "raw_queue_size": 32768,
+    "decoded_queue_size": 32768,
+    "reconnect_interval_ms": 3000,
+    "queue_push_timeout_ms": 5
+  },
+  "connections": [
+    {
+      "host": "nyse.primary",
+      "port": 8888,
+      "item": "AAPL",
+      "client_id": "ClientA",
+      "starting_seq": 0
+    },
+    {
+      "host": "nyse.backup",
+      "port": 8889,
+      "item": "AAPL",
+      "client_id": "ClientA",
+      "starting_seq": 0
+    },
+    {
+      "host": "nasdaq.feed",
+      "port": 8890,
+      "item": "MSFT",
+      "client_id": "ClientB",
+      "starting_seq": 0
+    }
+  ],
+  "memory_pool": {
+    "class_5": {
+      "initial": 512,
+      "max_free": 1024,
+      "max_total": 8192
+    }
+  }
+}
+```
+
+**Configuration Precedence** (highest to lowest):
+
+1. Command-line arguments
+2. Environment variables  
+3. Configuration file
+4. Hardcoded defaults
+
+This means you can set defaults in the config file and override specific values via environment variables or CLI args.
+
 ### Using Environment Variables
 
 **Global settings:**
