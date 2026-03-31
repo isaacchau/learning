@@ -47,11 +47,19 @@ public:
 
   // Default size classes: 64B, 256B, 1KB, 4KB, 16KB, 64KB, 128KB, 256KB
   // Format: {block_size, initial_count, max_free_list, max_total_allocated}
+  // 
+  // NOTE: max_total_allocated increased for high-throughput scenarios
+  // (70k+ msg/s). Each recv buffer (64KB) stays allocated until message
+  // is processed. With 3 pipeline stages, need 3x burst capacity.
   static std::vector<SizeClassConfig> defaultConfig() {
-    return {{64, 64, 512, 1024},      {256, 64, 512, 1024},
-            {1024, 64, 512, 1024},    {4096, 128, 512, 2048},
-            {16384, 128, 256, 1024},  {65536, 128, 256, 1024},
-            {131072, 64, 128, 512},   {262144, 32, 64, 256}};
+    return {{64,     128, 1024, 4096},   // Small metadata
+            {256,    128, 1024, 4096},   // Small messages
+            {1024,   128, 1024, 4096},   // 1KB messages
+            {4096,   256, 1024, 8192},   // 4KB messages
+            {16384,  256, 512,  4096},   // 16KB messages
+            {65536,  512, 1024, 8192},   // 64KB - recv buffer size, INCREASED
+            {131072, 256, 512,  4096},   // 128KB large messages
+            {262144, 128, 256,  2048}};  // 256KB max messages
   }
 
   explicit MemoryPool(
