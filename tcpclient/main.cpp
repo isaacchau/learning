@@ -27,12 +27,9 @@ static void signalHandler(int signum) {
 
 static void printUsage(const char *prog) {
   fprintf(stderr,
-          "Usage: %s [options]\n"
+          "Usage: %s [options] [connection ...]\n"
+          "\n"
           "Options:\n"
-          "  --host <addr>        Server hostname/IP  (default: %s)\n"
-          "  --port <port>        Server port          (default: %u)\n"
-          "  --item <name>        Subscription item   (default: \"%s\")\n"
-          "  --seq <num>          Starting sequence     (default: %lu)\n"
           "  --workers <num>      Worker thread count   (default: %zu)\n"
           "  --raw-queue <size>   Raw queue size        (default: %zu)\n"
           "  --dec-queue <size>   Decoded queue size    (default: %zu)\n"
@@ -45,18 +42,47 @@ static void printUsage(const char *prog) {
           "  --log-stdout <lvl>   STDOUT log level      (default: 6/INFO)\n"
           "  --log-file <lvl>     FILE log level        (default: 7/DEBUG)\n"
           "  --log-syslog <lvl>   SYSLOG log level      (default: 5/NOTICE)\n"
-          "  -h, --help           Show this help\n",
+          "  -h, --help           Show this help\n"
+          "\n"
+          "Connection Specification (can be specified multiple times):\n"
+          "  --host <addr>        Server hostname/IP\n"
+          "  --port <port>        Server port\n"
+          "  --item <name>        Subscription item name\n"
+          "  --client-id <id>     Client identifier\n"
+          "  --seq <num>          Starting sequence number\n"
+          "\n"
+          "Examples:\n"
+          "  # Single connection (backward compatible)\n"
+          "  %s --host 127.0.0.1 --port 8888 --item default\n"
+          "\n"
+          "  # Multiple connections to same server with different items\n"
+          "  %s --host 127.0.0.1 --port 8888 --item A \\\n"
+          "     --host 127.0.0.1 --port 8888 --item B\n"
+          "\n"
+          "  # Multiple connections to different servers\n"
+          "  %s --host server1 --port 8888 --item data1 --client-id Client1 \\\n"
+          "     --host server2 --port 8889 --item data2 --client-id Client2\n"
+          "\n"
+          "Environment Variables:\n"
+          "  APP_TCP_CLIENT_HOST      Default host\n"
+          "  APP_TCP_CLIENT_PORT      Default port\n"
+          "  APP_TCP_CLIENT_ITEM      Default item name\n"
+          "  APP_TCP_CLIENT_CLIENT_ID Default client ID\n"
+          "  APP_TCP_CLIENT_SEQ       Default starting sequence\n"
+          "  APP_TCP_CLIENT_WORKERS   Worker thread count\n"
+          "  APP_TCP_CLIENT_RAW_QUEUE Raw queue size\n"
+          "  APP_TCP_CLIENT_DEC_QUEUE Decoded queue size\n"
+          "  APP_TCP_CLIENT_RECONNECT Reconnect interval (ms)\n"
+          "  APP_TCP_CLIENT_QUEUE_TIMEOUT Queue push timeout (ms)\n"
+          ,
           prog,
-          Defaults::HOST,
-          Defaults::PORT,
-          Defaults::ITEM_NAME,
-          (unsigned long)Defaults::STARTING_SEQ_NUM,
           Defaults::WORKER_THREAD_COUNT,
           Defaults::RAW_QUEUE_SIZE,
           Defaults::DECODED_QUEUE_SIZE,
           Defaults::RECONNECT_INTERVAL_MS,
           Defaults::QUEUE_PUSH_TIMEOUT_MS,
-          Defaults::STATS_INTERVAL_SEC);
+          Defaults::STATS_INTERVAL_SEC,
+          prog, prog, prog);
 }
 
 // ============================================================================
@@ -84,29 +110,47 @@ int main(int argc, char *argv[]) {
     return def;
   };
 
-  // Level 3 (Defaults) overridden by Level 2 (Environment Variables)
+  // Build client configuration
   MsgClientConfig config;
-  config.host                 = getEnvStr("APP_TCP_CLIENT_HOST", "127.0.0.1");
-  config.port                 = static_cast<uint16_t>(getEnvInt("APP_TCP_CLIENT_PORT", 8888));
-  config.item_name           = getEnvStr("APP_TCP_CLIENT_ITEM", "default");
-  config.starting_seq_num     = getEnvUll("APP_TCP_CLIENT_SEQ", 0);
-  config.worker_thread_count  = static_cast<size_t>(getEnvInt("APP_TCP_CLIENT_WORKERS", 2));
-  config.raw_queue_size       = static_cast<size_t>(getEnvInt("APP_TCP_CLIENT_RAW_QUEUE", 8192));
-  config.decoded_queue_size   = static_cast<size_t>(getEnvInt("APP_TCP_CLIENT_DEC_QUEUE", 8192));
+  
+  // Global settings from environment
+  config.worker_thread_count  = static_cast<size_t>(getEnvInt("APP_TCP_CLIENT_WORKERS", Defaults::WORKER_THREAD_COUNT));
+  config.raw_queue_size       = static_cast<size_t>(getEnvInt("APP_TCP_CLIENT_RAW_QUEUE", Defaults::RAW_QUEUE_SIZE));
+  config.decoded_queue_size   = static_cast<size_t>(getEnvInt("APP_TCP_CLIENT_DEC_QUEUE", Defaults::DECODED_QUEUE_SIZE));
   config.reconnect_interval_ms= getEnvInt("APP_TCP_CLIENT_RECONNECT", Defaults::RECONNECT_INTERVAL_MS);
   config.queue_push_timeout_ms= getEnvInt("APP_TCP_CLIENT_QUEUE_TIMEOUT", Defaults::QUEUE_PUSH_TIMEOUT_MS);
 
   int stats_interval_sec = getEnvInt("APP_TCP_CLIENT_STATS_INTERVAL", Defaults::STATS_INTERVAL_SEC);
-  int pool_stats_interval_sec = 0;  // Default: off (0 = disabled)
+  int pool_stats_interval_sec = 0;
   std::string log_dir = getEnvStr("APP_LOG_DIR", "");
   int log_stdout = -1;
   int log_file = -1;
   int log_syslog = -1;
 
+  // Connection being built
+  ConnectionConfig current_conn;
+  current_conn.host = getEnvStr("APP_TCP_CLIENT_HOST", Defaults::HOST);
+  current_conn.port = static_cast<uint16_t>(getEnvInt("APP_TCP_CLIENT_PORT", Defaults::PORT));
+  current_conn.item_name = getEnvStr("APP_TCP_CLIENT_ITEM", Defaults::ITEM_NAME);
+  current_conn.client_id = getEnvStr("APP_TCP_CLIENT_CLIENT_ID", Defaults::CLIENT_ID);
+  current_conn.starting_seq_num = getEnvUll("APP_TCP_CLIENT_SEQ", Defaults::STARTING_SEQ_NUM);
+  bool has_connection = false;
+
   // Parse command-line arguments
   for (int i = 1; i < argc; ++i) {
     if ((strcmp(argv[i], "--host") == 0) && i + 1 < argc) {
-      config.host = argv[++i];
+      // If we already have a connection building, save it and start a new one
+      if (has_connection) {
+        config.connections.push_back(current_conn);
+        // Reset with defaults from environment
+        current_conn.host = getEnvStr("APP_TCP_CLIENT_HOST", Defaults::HOST);
+        current_conn.port = static_cast<uint16_t>(getEnvInt("APP_TCP_CLIENT_PORT", Defaults::PORT));
+        current_conn.item_name = getEnvStr("APP_TCP_CLIENT_ITEM", Defaults::ITEM_NAME);
+        current_conn.client_id = getEnvStr("APP_TCP_CLIENT_CLIENT_ID", Defaults::CLIENT_ID);
+        current_conn.starting_seq_num = getEnvUll("APP_TCP_CLIENT_SEQ", Defaults::STARTING_SEQ_NUM);
+      }
+      current_conn.host = argv[++i];
+      has_connection = true;
     } else if ((strcmp(argv[i], "--port") == 0) && i + 1 < argc) {
       try {
         int port = std::stoi(argv[++i]);
@@ -115,16 +159,22 @@ int main(int argc, char *argv[]) {
                   Defaults::MIN_PORT, Defaults::MAX_PORT);
           return 1;
         }
-        config.port = static_cast<uint16_t>(port);
+        current_conn.port = static_cast<uint16_t>(port);
+        has_connection = true;
       } catch (...) {
         fprintf(stderr, "Error: Invalid port number: %s\n", argv[i]);
         return 1;
       }
     } else if ((strcmp(argv[i], "--item") == 0) && i + 1 < argc) {
-      config.item_name = argv[++i];
+      current_conn.item_name = argv[++i];
+      has_connection = true;
+    } else if ((strcmp(argv[i], "--client-id") == 0) && i + 1 < argc) {
+      current_conn.client_id = argv[++i];
+      has_connection = true;
     } else if ((strcmp(argv[i], "--seq") == 0) && i + 1 < argc) {
       try {
-        config.starting_seq_num = std::stoull(argv[++i]);
+        current_conn.starting_seq_num = std::stoull(argv[++i]);
+        has_connection = true;
       } catch (...) {
         fprintf(stderr, "Error: Invalid sequence number: %s\n", argv[i]);
         return 1;
@@ -200,6 +250,22 @@ int main(int argc, char *argv[]) {
     }
   }
 
+  // Add the last connection if one was being built
+  if (has_connection) {
+    config.connections.push_back(current_conn);
+  }
+
+  // If no connections specified, create a default one
+  if (config.connections.empty()) {
+    ConnectionConfig default_conn;
+    default_conn.host = getEnvStr("APP_TCP_CLIENT_HOST", Defaults::HOST);
+    default_conn.port = static_cast<uint16_t>(getEnvInt("APP_TCP_CLIENT_PORT", Defaults::PORT));
+    default_conn.item_name = getEnvStr("APP_TCP_CLIENT_ITEM", Defaults::ITEM_NAME);
+    default_conn.client_id = getEnvStr("APP_TCP_CLIENT_CLIENT_ID", Defaults::CLIENT_ID);
+    default_conn.starting_seq_num = getEnvUll("APP_TCP_CLIENT_SEQ", Defaults::STARTING_SEQ_NUM);
+    config.connections.push_back(default_conn);
+  }
+
   // Validate configuration
   std::string validation_error = config.validate();
   if (!validation_error.empty()) {
@@ -223,32 +289,31 @@ int main(int argc, char *argv[]) {
   signal(SIGPIPE, SIG_IGN);
 
   // Print configuration
-  LOG_INFO("=== MsgClient Configuration ===\n"
-           "  Host:           %s\n"
-           "  Port:           %u\n"
-           "  Item:           %s\n"
-           "  Starting Seq:   %lu\n"
-           "  Workers:        %zu\n"
-           "  Raw Queue:      %zu\n"
-           "  Decoded Queue:  %zu (per worker)\n"
-           "  Reconnect:      %d ms\n"
-           "  Queue Timeout:  %d ms\n"
-           "  Stats Interval: %d s\n"
-           "================================",
-           config.host.c_str(), config.port, config.item_name.c_str(),
-           config.starting_seq_num, config.worker_thread_count,
-           config.raw_queue_size, config.decoded_queue_size,
-           config.reconnect_interval_ms, config.queue_push_timeout_ms,
-           stats_interval_sec);
+  LOG_INFO("=== MsgClient Configuration ===");
+  LOG_INFO("  Workers:        %zu", config.worker_thread_count);
+  LOG_INFO("  Raw Queue:      %zu", config.raw_queue_size);
+  LOG_INFO("  Decoded Queue:  %zu (per worker)", config.decoded_queue_size);
+  LOG_INFO("  Reconnect:      %d ms", config.reconnect_interval_ms);
+  LOG_INFO("  Queue Timeout:  %d ms", config.queue_push_timeout_ms);
+  LOG_INFO("  Stats Interval: %d s", stats_interval_sec);
+  LOG_INFO("  Connections:    %zu", config.connections.size());
+  for (size_t i = 0; i < config.connections.size(); ++i) {
+    const auto& conn = config.connections[i];
+    LOG_INFO("    [%zu] %s:%u (item='%s', client='%s', seq=%lu)",
+             i, conn.host.c_str(), conn.port, conn.item_name.c_str(),
+             conn.client_id.c_str(), conn.starting_seq_num);
+  }
+  LOG_INFO("================================");
 
   // Create and start client
   MsgClient client(config);
 
-  client.setMessageHandler([](const SubMessage &msg, size_t worker_index) {
+  client.setMessageHandler([](const SubMessage &msg, size_t worker_index, size_t connection_id) {
     // Default handler: silent processing.
     // In production, replace with actual business logic.
     (void)msg;
     (void)worker_index;
+    (void)connection_id;
   });
 
   client.start();
@@ -264,8 +329,7 @@ int main(int argc, char *argv[]) {
 
     auto now = std::chrono::steady_clock::now();
     auto elapsed =
-        std::chrono::duration_cast<std::chrono::seconds>(now - last_print)
-            .count();
+        std::chrono::duration_cast<std::chrono::seconds>(now - last_print).count();
 
     if (elapsed >= stats_interval_sec) {
       StatsSnapshot snap = client.getStats();
@@ -279,11 +343,20 @@ int main(int argc, char *argv[]) {
 
       LOG_INFO("[Stats] recv=%lu(+%lu) decoded=%lu proc=%lu(+%lu) "
                "dropped=%lu bytes=%lu(%.2f Mbps) reconnects=%lu "
-               "parse_err=%lu",
+               "parse_err=%lu conns=%zu",
                snap.messages_received, delta_recv, snap.messages_decoded,
                snap.messages_processed, delta_proc, snap.messages_dropped,
                snap.bytes_received, mbps,
-               snap.reconnect_count, snap.parse_errors);
+               snap.reconnect_count, snap.parse_errors,
+               snap.connection_stats.size());
+
+      // Print per-connection stats
+      for (const auto& cs : snap.connection_stats) {
+        LOG_INFO("[Conn %lu] %s item='%s' recv=%lu bytes=%lu reconnects=%lu %s",
+                 cs.connection_id, cs.endpoint.c_str(), cs.item_name.c_str(),
+                 cs.messages_received, cs.bytes_received, cs.reconnect_count,
+                 cs.connected ? "(connected)" : "(disconnected)");
+      }
 
       prev_snap = snap;
       last_print = now;

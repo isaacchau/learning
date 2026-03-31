@@ -84,10 +84,11 @@ inline size_t getRecvBufferSize() {
 struct RawMessage {
   std::shared_ptr<Buffer> buffer; // Shared reference to recv buffer
   size_t offset;                  // Start of this message within buffer->data
-  size_t length;    // Total message length (== TcpResponse.respLen)
-  uint64_t seq_num; // From TcpResponse.respSeq
+  size_t length;                  // Total message length (== TcpResponse.respLen)
+  uint64_t seq_num;               // From TcpResponse.respSeq
+  size_t connection_id;           // Which connection this message came from
 
-  RawMessage() : offset(0), length(0), seq_num(0) {}
+  RawMessage() : offset(0), length(0), seq_num(0), connection_id(0) {}
 };
 
 // Decoded sub-message: produced by decoder thread, consumed by worker threads.
@@ -99,9 +100,10 @@ struct SubMessage {
   uint16_t flags;                 // From MsgHdr.flags
   const char *body;               // Pointer into buffer->data (after MsgHdr)
   size_t body_length;             // Body size in bytes
+  size_t connection_id;           // Which connection this message came from
 
   SubMessage()
-      : seq_num(0), timestamp(0), flags(0), body(nullptr), body_length(0) {}
+      : seq_num(0), timestamp(0), flags(0), body(nullptr), body_length(0), connection_id(0) {}
 
   const char *data() const { return body; }
   size_t length() const { return body_length; }
