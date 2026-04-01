@@ -268,11 +268,26 @@ int main(int argc, char *argv[]) {
     } else if ((strcmp(argv[i], "--log-dir") == 0) && i + 1 < argc) {
       log_dir = argv[++i];
     } else if ((strcmp(argv[i], "--log-stdout") == 0) && i + 1 < argc) {
-      log_stdout = std::stoi(argv[++i]);
+      try {
+        log_stdout = std::stoi(argv[++i]);
+      } catch (...) {
+        fprintf(stderr, "Error: Invalid log stdout level: %s\n", argv[i]);
+        return 1;
+      }
     } else if ((strcmp(argv[i], "--log-file") == 0) && i + 1 < argc) {
-      log_file = std::stoi(argv[++i]);
+      try {
+        log_file = std::stoi(argv[++i]);
+      } catch (...) {
+        fprintf(stderr, "Error: Invalid log file level: %s\n", argv[i]);
+        return 1;
+      }
     } else if ((strcmp(argv[i], "--log-syslog") == 0) && i + 1 < argc) {
-      log_syslog = std::stoi(argv[++i]);
+      try {
+        log_syslog = std::stoi(argv[++i]);
+      } catch (...) {
+        fprintf(stderr, "Error: Invalid log syslog level: %s\n", argv[i]);
+        return 1;
+      }
     } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
       printUsage(argv[0]);
       return 0;
@@ -357,7 +372,7 @@ int main(int argc, char *argv[]) {
   auto last_pool_print = std::chrono::steady_clock::now();
   StatsSnapshot prev_snap = {};
 
-  while (!g_shutdown.load(std::memory_order_relaxed)) {
+  while (!g_shutdown.load(std::memory_order_acquire)) {
     sleep(1);
 
     auto now = std::chrono::steady_clock::now();

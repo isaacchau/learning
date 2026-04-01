@@ -215,7 +215,7 @@ struct ConnectionState {
     std::atomic<uint64_t> bytes_received_;      // Bytes received on this connection
     std::atomic<uint64_t> reconnect_count_;     // Reconnect count for this connection
 
-    struct sockaddr_storage resolved_addr;      // Pre-resolved address
+    struct sockaddr_storage resolved_addr{};    // Pre-resolved address
     socklen_t resolved_addr_len = 0;            // Length of resolved address
 
     ConnectionState(const ConnectionConfig& cfg);
@@ -239,7 +239,6 @@ struct MsgClientStats {
     std::atomic<uint64_t> bytes_received{0};
     std::atomic<uint64_t> reconnect_count{0};
     std::atomic<uint64_t> parse_errors{0};
-    std::atomic<uint64_t> queue_full_errors{0};  // Deprecated: use messages_dropped
 };
 
 struct ConnectionStats {
@@ -261,7 +260,6 @@ struct StatsSnapshot {
     uint64_t bytes_received;
     uint64_t reconnect_count;
     uint64_t parse_errors;
-    uint64_t queue_full_errors;
     std::vector<ConnectionStats> connection_stats;
 };
 
@@ -347,6 +345,13 @@ private:
     
     // Epoll instance for efficient multi-connection I/O (Linux only)
     std::atomic<int> epoll_fd_;
+
+    // Cached environment-derived constants (read once at construction)
+    size_t recv_buffer_size_ = 0;
+    int    tcp_keepidle_ = 0;
+    int    tcp_keepintvl_ = 0;
+    int    tcp_keepcnt_ = 0;
+    int    tcp_rcvbuf_ = 0;
 };
 
 #endif // MSG_CLIENT_H

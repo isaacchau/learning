@@ -84,7 +84,7 @@ struct LogMsg::Impl {
         }
 
         // Create log directory (fails safely if already exists)
-        mkdir(dir.c_str(), 0777);
+        mkdir(dir.c_str(), 0750);
 
         // Get time for filename
         auto t = std::time(nullptr);

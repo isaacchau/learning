@@ -47,41 +47,55 @@ static bool sendAll(int fd, const void *data, size_t len) {
   size_t sent = 0;
   while (sent < len) {
     ssize_t n = ::send(fd, p + sent, len - sent, MSG_NOSIGNAL);
-    if (n <= 0)
+    if (n < 0) {
+      if (errno == EINTR)
+        continue;
+      return false;
+    }
+    if (n == 0)
       return false;
     sent += static_cast<size_t>(n);
   }
   return true;
 }
 
-// Set terminal to non-canonical mode for single character input
-static void setNonCanonicalMode(bool enable) {
-  static struct termios old_tio, new_tio;
-  static bool saved = false;
-  
-  if (enable) {
-    tcgetattr(STDIN_FILENO, &old_tio);
-    saved = true;
-    new_tio = old_tio;
-    new_tio.c_lflag &= ~(ICANON | ECHO);
-    new_tio.c_cc[VMIN] = 0;
-    new_tio.c_cc[VTIME] = 0;
-    tcsetattr(STDIN_FILENO, TCSANOW, &new_tio);
-  } else if (saved) {
-    tcsetattr(STDIN_FILENO, TCSANOW, &old_tio);
+// RAII guard for terminal non-canonical mode
+class TerminalModeGuard {
+  struct termios old_tio_;
+  bool saved_ = false;
+public:
+  TerminalModeGuard() {
+    if (tcgetattr(STDIN_FILENO, &old_tio_) == 0) {
+      saved_ = true;
+    }
   }
-}
+  void setNonCanonical() {
+    if (saved_) {
+      struct termios new_tio = old_tio_;
+      new_tio.c_lflag &= ~(ICANON | ECHO);
+      new_tio.c_cc[VMIN] = 0;
+      new_tio.c_cc[VTIME] = 0;
+      tcsetattr(STDIN_FILENO, TCSANOW, &new_tio);
+    }
+  }
+  ~TerminalModeGuard() {
+    if (saved_) {
+      tcsetattr(STDIN_FILENO, TCSANOW, &old_tio_);
+    }
+  }
+};
 
 // Keyboard input thread for dynamic rate control
 static void keyboardInputThread() {
-  setNonCanonicalMode(true);
-  
+  TerminalModeGuard term_guard;
+  term_guard.setNonCanonical();
+
   char c;
   while (!g_shutdown.load(std::memory_order_relaxed)) {
     if (read(STDIN_FILENO, &c, 1) > 0) {
       int current_rate = g_msg_rate.load(std::memory_order_relaxed);
       int new_rate = current_rate;
-      
+
       switch (c) {
         case 'u':
         case 'U':
@@ -96,7 +110,7 @@ static void keyboardInputThread() {
           g_rate_changed.store(true, std::memory_order_relaxed);
           LOG_INFO("[Server] Rate increased: %d -> %d msgs/s", current_rate, new_rate);
           break;
-          
+
         case 'd':
         case 'D':
           // Decrease by 10%
@@ -110,7 +124,7 @@ static void keyboardInputThread() {
             LOG_INFO("[Server] Currently at max rate (0), cannot decrease");
           }
           break;
-          
+
         case 'o':
         case 'O':
           // Reset to original
@@ -119,24 +133,22 @@ static void keyboardInputThread() {
           g_rate_changed.store(true, std::memory_order_relaxed);
           LOG_INFO("[Server] Rate reset to original: %d msgs/s", new_rate);
           break;
-          
+
         case 'q':
         case 'Q':
           LOG_INFO("[Server] Quit requested via keyboard");
           g_shutdown.store(true, std::memory_order_release);
           break;
-          
+
         default:
           // Ignore other keys
           break;
       }
     }
-    
+
     // Small sleep to prevent busy-waiting
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
-  
-  setNonCanonicalMode(false);
 }
 
 static void printUsage(const char *prog) {
@@ -182,13 +194,33 @@ int main(int argc, char *argv[]) {
 
   for (int i = 1; i < argc; ++i) {
     if ((strcmp(argv[i], "--port") == 0) && i + 1 < argc) {
-      port = static_cast<uint16_t>(std::stoi(argv[++i]));
+      try {
+        port = static_cast<uint16_t>(std::stoi(argv[++i]));
+      } catch (...) {
+        fprintf(stderr, "Error: Invalid port number: %s\n", argv[i]);
+        return 1;
+      }
     } else if ((strcmp(argv[i], "--msg-size") == 0) && i + 1 < argc) {
-      msg_size = static_cast<size_t>(std::stoi(argv[++i]));
+      try {
+        msg_size = static_cast<size_t>(std::stoi(argv[++i]));
+      } catch (...) {
+        fprintf(stderr, "Error: Invalid message size: %s\n", argv[i]);
+        return 1;
+      }
     } else if ((strcmp(argv[i], "--msg-rate") == 0) && i + 1 < argc) {
-      msg_rate = std::stoi(argv[++i]);
+      try {
+        msg_rate = std::stoi(argv[++i]);
+      } catch (...) {
+        fprintf(stderr, "Error: Invalid message rate: %s\n", argv[i]);
+        return 1;
+      }
     } else if ((strcmp(argv[i], "--msg-count") == 0) && i + 1 < argc) {
-      msg_count = std::stoull(argv[++i]);
+      try {
+        msg_count = std::stoull(argv[++i]);
+      } catch (...) {
+        fprintf(stderr, "Error: Invalid message count: %s\n", argv[i]);
+        return 1;
+      }
     } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
       printUsage(argv[0]);
       return 0;
