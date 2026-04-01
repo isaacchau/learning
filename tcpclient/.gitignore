@@ -19,5 +19,8 @@ cppcheck_output.txt
 # Log files
 log/*
 
+# Kimi artifacts
+AGENTS.md
+
 # Claude artifacts
 CLAUDE.md
