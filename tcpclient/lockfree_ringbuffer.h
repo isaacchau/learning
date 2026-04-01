@@ -61,11 +61,25 @@ public:
     // If push fails (queue full), item is NOT moved and can be retried.
     bool push_wait(const T& item, int timeout_ms) {
         if (push(item)) return true;
+        if (timeout_ms < 0) return false;
+        if (timeout_ms == 0) {
+            while (!push(item)) {
+                std::this_thread::yield();
+            }
+            return true;
+        }
         return waitAndRetry([this, &item]() { return push(item); }, timeout_ms);
     }
 
     bool push_wait(T&& item, int timeout_ms) {
         if (push(std::move(item))) return true;
+        if (timeout_ms < 0) return false;
+        if (timeout_ms == 0) {
+            while (!push(std::move(item))) {
+                std::this_thread::yield();
+            }
+            return true;
+        }
         // If push failed, the move didn't execute (assignment was not reached).
         // item is still valid and can be retried.
         return waitAndRetry([this, &item]() { return push(std::move(item)); }, timeout_ms);
@@ -85,6 +99,13 @@ public:
     // Blocking pop with progressive backoff. Returns false on timeout.
     bool pop_wait(T& item, int timeout_ms) {
         if (pop(item)) return true;
+        if (timeout_ms < 0) return false;
+        if (timeout_ms == 0) {
+            while (!pop(item)) {
+                std::this_thread::yield();
+            }
+            return true;
+        }
         return waitAndRetry([this, &item]() { return pop(item); }, timeout_ms);
     }
 

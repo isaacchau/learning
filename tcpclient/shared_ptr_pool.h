@@ -102,30 +102,28 @@ public:
   std::shared_ptr<Buffer> allocate(size_t requested_size) {
     size_t cls = findSizeClass(requested_size);
     Buffer *buf = nullptr;
+    bool need_os_alloc = false;
 
     {
       std::lock_guard<std::mutex> lock(classes_[cls].mutex);
       if (!classes_[cls].free_list.empty()) {
         buf = classes_[cls].free_list.back();
         classes_[cls].free_list.pop_back();
+        classes_[cls].current_allocated.fetch_add(1, std::memory_order_relaxed);
+      } else {
+        size_t max = classes_[cls].max_total_allocated;
+        if (max > 0 && classes_[cls].current_allocated.load(std::memory_order_relaxed) >= max) {
+          return std::shared_ptr<Buffer>();
+        }
+        need_os_alloc = true;
+        classes_[cls].current_allocated.fetch_add(1, std::memory_order_relaxed);
       }
     }
 
-    if (!buf) {
-      // Check if we've hit the allocation limit
-      size_t current = classes_[cls].current_allocated.load(std::memory_order_relaxed);
-      size_t max = classes_[cls].max_total_allocated;
-      if (max > 0 && current >= max) {
-        // Allocation limit reached
-        return std::shared_ptr<Buffer>();
-      }
-      
+    if (need_os_alloc) {
       buf = Buffer::create(classes_[cls].block_size);
       classes_[cls].total_allocated.fetch_add(1, std::memory_order_relaxed);
     }
-
-    // Increment current allocated count (buffer is now in use)
-    classes_[cls].current_allocated.fetch_add(1, std::memory_order_relaxed);
 
     // Custom deleter returns buffer to pool (or destroys if pool is full)
     return std::shared_ptr<Buffer>(
@@ -197,7 +195,9 @@ private:
     // Security: Clear buffer contents before returning to pool.
     // This prevents sensitive data from leaking to subsequent allocations.
     // This is done in the worker thread (not IO thread), so it doesn't
-    // impact network receive performance.
+    // impact network receive performance.  It is a deliberate trade-off:
+    // we burn some memory-bandwidth/CPU in the worker to guarantee that
+    // the next recipient of this buffer sees zeros instead of stale data.
     std::memset(buf->data, 0, buf->capacity);
 
     std::lock_guard<std::mutex> lock(classes_[class_idx].mutex);

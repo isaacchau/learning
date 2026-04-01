@@ -25,112 +25,57 @@ class SocketGuard {
 public:
     SocketGuard() : fd_(-1) {}
     explicit SocketGuard(int fd) : fd_(fd) {}
-    
+
     ~SocketGuard() { close(); }
-    
+
     // Non-copyable
     SocketGuard(const SocketGuard&) = delete;
     SocketGuard& operator=(const SocketGuard&) = delete;
-    
+
     // Movable
     SocketGuard(SocketGuard&& other) noexcept : fd_(other.release()) {}
     SocketGuard& operator=(SocketGuard&& other) noexcept {
         if (this != &other) {
             close();
-            fd_ = other.release();
+            fd_.store(other.release(), std::memory_order_relaxed);
         }
         return *this;
     }
-    
+
     // Reset with new fd
     void reset(int fd = -1) {
-        if (fd_ != fd) {
+        if (fd_.load(std::memory_order_relaxed) != fd) {
             close();
-            fd_ = fd;
+            fd_.store(fd, std::memory_order_relaxed);
         }
     }
-    
+
     // Release ownership without closing
     int release() noexcept {
-        int tmp = fd_;
-        fd_ = -1;
-        return tmp;
+        return fd_.exchange(-1, std::memory_order_relaxed);
     }
-    
+
     // Close the socket
     void close() {
-        if (fd_ >= 0) {
-            ::shutdown(fd_, SHUT_RDWR);
-            ::close(fd_);
-            fd_ = -1;
+        int fd = fd_.exchange(-1, std::memory_order_relaxed);
+        if (fd >= 0) {
+            ::shutdown(fd, SHUT_RDWR);
+            ::close(fd);
         }
     }
-    
+
     // Get the fd
-    int get() const noexcept { return fd_; }
-    
+    int get() const noexcept { return fd_.load(std::memory_order_relaxed); }
+
     // Check if valid
-    bool valid() const noexcept { return fd_ >= 0; }
-    
+    bool valid() const noexcept { return fd_.load(std::memory_order_relaxed) >= 0; }
+
     // Boolean conversion
     explicit operator bool() const noexcept { return valid(); }
-    
+
 private:
-    int fd_;
+    std::atomic<int> fd_;
 };
-
-// ============================================================================
-// Thread Join with Timeout Helper
-// ============================================================================
-
-#include <chrono>
-#include <future>
-
-#ifdef __linux__
-#include <pthread.h>
-#endif
-
-// Join a thread with timeout (milliseconds).
-// Returns true if thread joined successfully, false if timeout.
-// NOTE: This function does NOT detach the thread on timeout - doing so would
-// risk use-after-free when the destructor runs while detached threads still
-// access member variables.
-inline bool joinWithTimeout(std::thread& t, int timeout_ms) {
-    if (!t.joinable()) return true;
-    
-    // Use async to wait with timeout
-    auto future = std::async(std::launch::async, [&t]() {
-        t.join();
-    });
-    
-    if (future.wait_for(std::chrono::milliseconds(timeout_ms)) == std::future_status::timeout) {
-        return false;  // Timeout - thread did not join
-    }
-    return true;
-}
-
-// Platform-specific thread cancellation (Linux only).
-// This is a last-resort measure for threads that won't stop gracefully.
-// NOTE: Cancellation is asynchronous and dangerous - the thread may be in
-// an inconsistent state. Only use during shutdown when you're about to exit.
-// Returns true if cancellation was attempted, false on non-Linux platforms.
-inline bool cancelThread(std::thread& t) {
-    if (!t.joinable()) return false;
-    
-#ifdef __linux__
-    // pthread_cancel requests cancellation at the next cancellation point
-    // The thread should exit if it's blocking on I/O, sleeping, or at other
-    // cancellation points. This is safer than detaching because:
-    // 1. Thread will stop (eventually)
-    // 2. No use-after-free risk since thread stops
-    int result = pthread_cancel(t.native_handle());
-    if (result == 0) {
-        return true;
-    }
-#endif
-    // On non-Linux platforms, we cannot safely force-stop a thread
-    return false;
-}
 
 // ============================================================================
 // Configuration Constants
@@ -269,9 +214,12 @@ struct ConnectionState {
     std::atomic<uint64_t> messages_received_;   // Messages received on this connection
     std::atomic<uint64_t> bytes_received_;      // Bytes received on this connection
     std::atomic<uint64_t> reconnect_count_;     // Reconnect count for this connection
-    
+
+    struct sockaddr_storage resolved_addr;      // Pre-resolved address
+    socklen_t resolved_addr_len = 0;            // Length of resolved address
+
     ConnectionState(const ConnectionConfig& cfg);
-    
+
     // Disable copy and move - stored via unique_ptr
     ConnectionState(const ConnectionState&) = delete;
     ConnectionState& operator=(const ConnectionState&) = delete;
@@ -361,6 +309,7 @@ private:
     void workerLoop(size_t worker_index);
 
     // Connection helpers
+    bool resolveHost(size_t conn_idx);
     bool connectToServer(size_t conn_idx);
     bool sendSubscription(size_t conn_idx);
     void closeConnection(size_t conn_idx);
@@ -397,7 +346,7 @@ private:
     MsgClientStats stats_;
     
     // Epoll instance for efficient multi-connection I/O (Linux only)
-    int epoll_fd_;
+    std::atomic<int> epoll_fd_;
 };
 
 #endif // MSG_CLIENT_H

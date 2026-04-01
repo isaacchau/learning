@@ -22,12 +22,12 @@ TARGET_TSAN = msg_client_tsan
 TARGET_UBSAN = msg_client_ubsan
 
 # Source files (same as main Makefile)
-CLIENT_SRCS = main.cpp msg_client.cpp log_msg.cpp
+CLIENT_SRCS = main.cpp msg_client.cpp log_msg.cpp config_parser.cpp
 
 # AddressSanitizer - Memory leaks, buffer overflows, use-after-free
 asan:
 	@echo "Building with AddressSanitizer..."
-	$(CXX) -std=c++14 $(ASAN_FLAGS) -Wall -Wextra -pthread -I. \
+	$(CXX) -std=c++14 -faligned-new $(ASAN_FLAGS) -Wall -Wextra -pthread -I. \
 		$(CLIENT_SRCS) -o $(TARGET_ASAN) -pthread
 	@echo "Run with: ./$(TARGET_ASAN) [options]"
 	@echo "ASAN_OPTIONS=detect_leaks=1 ./$(TARGET_ASAN)"  
@@ -36,14 +36,14 @@ asan:
 # Note: TSan and ASan cannot be combined
 tsan:
 	@echo "Building with ThreadSanitizer..."
-	$(CXX) -std=c++14 $(TSAN_FLAGS) -Wall -Wextra -pthread -I. \
+	$(CXX) -std=c++14 -faligned-new $(TSAN_FLAGS) -Wall -Wextra -pthread -I. \
 		$(CLIENT_SRCS) -o $(TARGET_TSAN) -pthread
 	@echo "Run with: ./$(TARGET_TSAN) [options]"
 
 # UndefinedBehaviorSanitizer - Signed overflow, etc.
 ubsan:
 	@echo "Building with UndefinedBehaviorSanitizer..."
-	$(CXX) -std=c++14 $(UBSAN_FLAGS) -Wall -Wextra -pthread -I. \
+	$(CXX) -std=c++14 -faligned-new $(UBSAN_FLAGS) -Wall -Wextra -pthread -I. \
 		$(CLIENT_SRCS) -o $(TARGET_UBSAN) -pthread
 	@echo "Run with: ./$(TARGET_UBSAN) [options]"
 

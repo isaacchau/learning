@@ -196,12 +196,12 @@ MsgClient::MsgClient(const MsgClientConfig& config)
     }
     
     // Create epoll instance for efficient multi-connection I/O
-    epoll_fd_ = ::epoll_create1(EPOLL_CLOEXEC);
-    if (epoll_fd_ < 0) {
+    epoll_fd_.store(::epoll_create1(EPOLL_CLOEXEC));
+    if (epoll_fd_.load() < 0) {
         LOG_ERR("[MsgClient] Failed to create epoll instance: %s", strerror(errno));
         // We'll fall back to the non-epoll path in ioLoop if epoll_fd_ < 0
     } else {
-        LOG_INFO("[MsgClient] Epoll instance created (fd=%d)", epoll_fd_);
+        LOG_INFO("[MsgClient] Epoll instance created (fd=%d)", epoll_fd_.load());
     }
 }
 
@@ -218,8 +218,18 @@ void MsgClient::setMessageHandler(MessageHandler handler) {
 }
 
 void MsgClient::start() {
-    if (running_.load(std::memory_order_relaxed)) return;
-    running_.store(true, std::memory_order_release);
+    if (running_.load()) return;
+
+    // Resolve hostnames on the main thread before any worker threads start.
+    for (size_t i = 0; i < connections_.size(); ++i) {
+        if (!resolveHost(i)) {
+            LOG_ERR("[MsgClient] Failed to resolve host for connection %zu (%s:%u). "
+                    "Client will retry during reconnection loop.",
+                    i, connections_[i]->config.host.c_str(), connections_[i]->config.port);
+        }
+    }
+
+    running_.store(true);
 
     // Launch worker threads first (consumers)
     worker_threads_.reserve(config_.worker_thread_count);
@@ -232,83 +242,38 @@ void MsgClient::start() {
 
     // Launch IO thread
     io_thread_ = std::thread(&MsgClient::ioLoop, this);
-    
+
     LOG_INFO("[MsgClient] Started with %zu connection(s), %zu worker thread(s)",
              connections_.size(), config_.worker_thread_count);
 }
 
 void MsgClient::stop() {
-    if (!running_.load(std::memory_order_relaxed)) return;
-    running_.store(false, std::memory_order_release);
+    if (!running_.load()) return;
+    running_.store(false);
 
     // Close all sockets to unblock any blocking recv/poll
     closeAllSockets();
 
-    // Join threads with a two-phase approach
-    const int JOIN_TIMEOUT_MS = Defaults::THREAD_JOIN_TIMEOUT_MS;
-    const int CANCEL_JOIN_TIMEOUT_MS = 2000;
-    bool io_cancelled = false, decoder_cancelled = false;
-    
+    // Close epoll_fd to wake up epoll_wait immediately (it will return EBADF)
+    int epoll_fd_local = epoll_fd_.exchange(-1);
+    if (epoll_fd_local >= 0) {
+        ::close(epoll_fd_local);
+    }
+
+    // Join all threads gracefully.  All blocking syscalls now have timeouts
+    // (SO_SNDTIMEO on connect, epoll_wait timeout, queue pop timeouts).
     if (io_thread_.joinable()) {
-        if (!joinWithTimeout(io_thread_, JOIN_TIMEOUT_MS)) {
-            LOG_WARN("[MsgClient] IO thread did not stop gracefully within %d ms, "
-                     "attempting force cancellation...", JOIN_TIMEOUT_MS);
-            io_cancelled = cancelThread(io_thread_);
-            if (io_cancelled) {
-                if (!joinWithTimeout(io_thread_, CANCEL_JOIN_TIMEOUT_MS)) {
-                    LOG_ERR("[MsgClient] CRITICAL: IO thread did not stop even after "
-                            "cancellation.");
-                }
-            } else {
-                LOG_ERR("[MsgClient] CRITICAL: Could not cancel IO thread (non-Linux). "
-                        "Waiting longer...");
-                joinWithTimeout(io_thread_, 60000);
-            }
-        }
+        io_thread_.join();
     }
-    
     if (decoder_thread_.joinable()) {
-        if (!joinWithTimeout(decoder_thread_, JOIN_TIMEOUT_MS)) {
-            LOG_WARN("[MsgClient] Decoder thread did not stop gracefully within %d ms, "
-                     "attempting force cancellation...", JOIN_TIMEOUT_MS);
-            decoder_cancelled = cancelThread(decoder_thread_);
-            if (decoder_cancelled) {
-                if (!joinWithTimeout(decoder_thread_, CANCEL_JOIN_TIMEOUT_MS)) {
-                    LOG_ERR("[MsgClient] CRITICAL: Decoder thread did not stop even after "
-                            "cancellation.");
-                }
-            } else {
-                LOG_ERR("[MsgClient] CRITICAL: Could not cancel Decoder thread. "
-                        "Waiting longer...");
-                joinWithTimeout(decoder_thread_, 60000);
-            }
-        }
+        decoder_thread_.join();
     }
-    
     for (auto& t : worker_threads_) {
         if (t.joinable()) {
-            if (!joinWithTimeout(t, JOIN_TIMEOUT_MS)) {
-                LOG_WARN("[MsgClient] Worker thread did not stop gracefully within %d ms, "
-                         "attempting force cancellation...", JOIN_TIMEOUT_MS);
-                if (cancelThread(t)) {
-                    joinWithTimeout(t, CANCEL_JOIN_TIMEOUT_MS);
-                } else {
-                    joinWithTimeout(t, 60000);
-                }
-            }
+            t.join();
         }
     }
     worker_threads_.clear();
-    
-    if (io_cancelled || decoder_cancelled) {
-        LOG_WARN("[MsgClient] Some threads required force cancellation during shutdown.");
-    }
-    
-    // Close epoll instance
-    if (epoll_fd_ >= 0) {
-        ::close(epoll_fd_);
-        epoll_fd_ = -1;
-    }
 }
 
 StatsSnapshot MsgClient::getStats() const {
@@ -345,19 +310,18 @@ std::vector<MemoryPool::Stats> MsgClient::getPoolStats() const {
 }
 
 bool MsgClient::isRunning() const {
-    return running_.load(std::memory_order_relaxed);
+    return running_.load();
 }
 
 // ============================================================================
 // Connection Helpers
 // ============================================================================
 
-bool MsgClient::connectToServer(size_t conn_idx) {
+bool MsgClient::resolveHost(size_t conn_idx) {
     if (conn_idx >= connections_.size()) return false;
-    
+
     ConnectionState& conn = *connections_[conn_idx];
-    
-    // Resolve hostname
+
     struct addrinfo hints, *result = nullptr;
     std::memset(&hints, 0, sizeof(hints));
     hints.ai_family   = AF_INET;
@@ -371,11 +335,26 @@ bool MsgClient::connectToServer(size_t conn_idx) {
         return false;
     }
 
+    std::memcpy(&conn.resolved_addr, result->ai_addr, result->ai_addrlen);
+    conn.resolved_addr_len = result->ai_addrlen;
+    ::freeaddrinfo(result);
+    return true;
+}
+
+bool MsgClient::connectToServer(size_t conn_idx) {
+    if (conn_idx >= connections_.size()) return false;
+
+    ConnectionState& conn = *connections_[conn_idx];
+
+    if (conn.resolved_addr_len == 0) {
+        LOG_ERR("[MsgClient][Conn %zu] No resolved address available", conn_idx);
+        return false;
+    }
+
     // Create socket
-    int fd = ::socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+    int fd = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (fd < 0) {
         LOG_ERR("[MsgClient][Conn %zu] socket() failed: %s", conn_idx, strerror(errno));
-        ::freeaddrinfo(result);
         return false;
     }
     conn.socket_guard.reset(fd);
@@ -400,14 +379,14 @@ bool MsgClient::connectToServer(size_t conn_idx) {
         ::setsockopt(conn.socket_guard.get(), IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
         ::setsockopt(conn.socket_guard.get(), IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
         ::setsockopt(conn.socket_guard.get(), IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
-        
-        LOG_INFO("[MsgClient][Conn %zu] TCP Keepalive configured: idle=%ds, intvl=%ds, probes=%d", 
+
+        LOG_INFO("[MsgClient][Conn %zu] TCP Keepalive configured: idle=%ds, intvl=%ds, probes=%d",
                  conn_idx, idle, intvl, cnt);
 #else
         LOG_INFO("[MsgClient][Conn %zu] TCP Keepalive enabled (OS defaults)", conn_idx);
 #endif
     } else {
-        LOG_WARN("[MsgClient][Conn %zu] Failed to enable SO_KEEPALIVE: %s", 
+        LOG_WARN("[MsgClient][Conn %zu] Failed to enable SO_KEEPALIVE: %s",
                  conn_idx, strerror(errno));
     }
 
@@ -433,9 +412,8 @@ bool MsgClient::connectToServer(size_t conn_idx) {
                  conn_idx, rcvbuf / 1024, 2097152 / 1024, old_size / 1024);
     }
 
-    // Connect
-    rc = ::connect(conn.socket_guard.get(), result->ai_addr, result->ai_addrlen);
-    ::freeaddrinfo(result);
+    // Connect using pre-resolved address
+    int rc = ::connect(conn.socket_guard.get(), reinterpret_cast<struct sockaddr*>(&conn.resolved_addr), conn.resolved_addr_len);
 
     if (rc < 0) {
         LOG_ERR("[MsgClient][Conn %zu] connect() to %s:%u failed: %s",
@@ -446,14 +424,15 @@ bool MsgClient::connectToServer(size_t conn_idx) {
 
     LOG_INFO("[MsgClient][Conn %zu] Connected to %s:%u",
              conn_idx, conn.config.host.c_str(), conn.config.port);
-    
+
     // Add socket to epoll for efficient I/O multiplexing
-    if (epoll_fd_ >= 0) {
+    int epoll_fd_local = epoll_fd_.load();
+    if (epoll_fd_local >= 0) {
         struct epoll_event ev;
         std::memset(&ev, 0, sizeof(ev));
         ev.events = EPOLLIN | EPOLLPRI | EPOLLERR | EPOLLHUP | EPOLLRDHUP;
         ev.data.u32 = static_cast<uint32_t>(conn_idx);  // Store connection index
-        if (::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, conn.socket_guard.get(), &ev) < 0) {
+        if (::epoll_ctl(epoll_fd_local, EPOLL_CTL_ADD, conn.socket_guard.get(), &ev) < 0) {
             LOG_ERR("[MsgClient][Conn %zu] Failed to add socket to epoll: %s",
                     conn_idx, strerror(errno));
             conn.socket_guard.close();
@@ -461,7 +440,7 @@ bool MsgClient::connectToServer(size_t conn_idx) {
         }
         LOG_DEBUG("[MsgClient][Conn %zu] Socket added to epoll", conn_idx);
     }
-    
+
     return true;
 }
 
@@ -493,8 +472,9 @@ bool MsgClient::sendSubscription(size_t conn_idx) {
 void MsgClient::closeConnection(size_t conn_idx) {
     if (conn_idx < connections_.size()) {
         // Remove from epoll before closing (ignore errors - socket might not be in epoll)
-        if (epoll_fd_ >= 0 && connections_[conn_idx]->socket_guard.valid()) {
-            ::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, connections_[conn_idx]->socket_guard.get(), nullptr);
+        int epoll_fd_local = epoll_fd_.load();
+        if (epoll_fd_local >= 0 && connections_[conn_idx]->socket_guard.valid()) {
+            ::epoll_ctl(epoll_fd_local, EPOLL_CTL_DEL, connections_[conn_idx]->socket_guard.get(), nullptr);
         }
         connections_[conn_idx]->socket_guard.close();
     }
@@ -526,10 +506,10 @@ void MsgClient::ioLoop() {
         connections_[i]->current_reconnect_delay_ms_ = config_.reconnect_interval_ms;
     }
 
-    while (running_.load(std::memory_order_relaxed)) {
+    while (running_.load()) {
         // Try to connect any disconnected connections
         for (size_t i = 0; i < connections_.size(); ++i) {
-            if (!connected[i] && running_.load(std::memory_order_relaxed)) {
+            if (!connected[i] && running_.load()) {
                 ConnectionState& conn = *connections_[i];
                 
                 if (!connectToServer(i)) {
@@ -597,14 +577,12 @@ void MsgClient::ioLoop() {
 
         // Wait for events using epoll
         struct epoll_event events[Defaults::MAX_CONNECTIONS];
-        int ret = ::epoll_wait(epoll_fd_, events, Defaults::MAX_CONNECTIONS, Defaults::POLL_TIMEOUT_MS);
+        int ret = ::epoll_wait(epoll_fd_.load(), events, Defaults::MAX_CONNECTIONS, Defaults::POLL_TIMEOUT_MS);
         
         if (ret < 0) {
             if (errno == EINTR) continue;
+            if (errno == EBADF && !running_.load()) continue;  // shutting down
             LOG_ERR("[MsgClient] epoll_wait() error: %s", strerror(errno));
-            // Mark all as disconnected to retry
-            std::fill(connected.begin(), connected.end(), false);
-            closeAllSockets();
             continue;
         }
 
@@ -776,7 +754,7 @@ void MsgClient::decoderLoop() {
     size_t worker_idx = 0;
     RawMessage raw;
 
-    while (running_.load(std::memory_order_relaxed)) {
+    while (running_.load()) {
         if (!raw_queue_->pop_wait(raw, Defaults::QUEUE_POP_TIMEOUT_MS)) {
             continue; // Timeout — re-check running_
         }
@@ -830,7 +808,7 @@ void MsgClient::decoderLoop() {
 void MsgClient::workerLoop(size_t worker_index) {
     SubMessage msg;
 
-    while (running_.load(std::memory_order_relaxed)) {
+    while (running_.load()) {
         if (!decoded_queues_[worker_index]->pop_wait(msg, Defaults::QUEUE_POP_TIMEOUT_MS)) {
             continue; // Timeout — re-check running_
         }

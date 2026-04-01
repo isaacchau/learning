@@ -18,3 +18,6 @@ cppcheck_output.txt
 
 # Log files
 log/*
+
+# Claude artifacts
+CLAUDE.md

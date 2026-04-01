@@ -12,24 +12,11 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <ctime>
+#include <mutex>
 
 #ifdef __linux__
 #include <sys/syscall.h>
 #endif
-
-// Fast Spinlock
-class SpinLock {
-    std::atomic_flag locked = ATOMIC_FLAG_INIT;
-public:
-    void lock() {
-        while (locked.test_and_set(std::memory_order_acquire)) {
-            // Spin
-        }
-    }
-    void unlock() {
-        locked.clear(std::memory_order_release);
-    }
-};
 
 struct LogEntry {
     LogLevel level;
@@ -48,7 +35,8 @@ struct LogMsg::Impl {
     LogEntry ring[Q_SIZE];
     std::atomic<size_t> write_idx{0};
     std::atomic<size_t> read_idx{0};
-    SpinLock lock;
+    std::mutex lock;
+    std::atomic<uint64_t> dropped{0};
 
     FILE* log_file = nullptr;
     bool is_interactive = true;
@@ -152,13 +140,16 @@ struct LogMsg::Impl {
 
         vsnprintf(entry.msg, sizeof(entry.msg), format, ap);
 
-        lock.lock();
-        size_t widx = write_idx.load(std::memory_order_relaxed);
-        if (widx - read_idx.load(std::memory_order_relaxed) < Q_SIZE) {
-            ring[widx % Q_SIZE] = entry;
-            write_idx.store(widx + 1, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> guard(lock);
+            size_t widx = write_idx.load(std::memory_order_relaxed);
+            if (widx - read_idx.load(std::memory_order_relaxed) < Q_SIZE) {
+                ring[widx % Q_SIZE] = entry;
+                write_idx.store(widx + 1, std::memory_order_release);
+            } else {
+                dropped.fetch_add(1, std::memory_order_relaxed);
+            }
         }
-        lock.unlock();
     }
 
     const char* getLevelStr(LogLevel l) {
@@ -212,6 +203,12 @@ struct LogMsg::Impl {
                 }
                 read_idx.store(ridx, std::memory_order_release);
                 if (log_file) fflush(log_file);
+
+                uint64_t d = dropped.exchange(0, std::memory_order_relaxed);
+                if (d > 0) {
+                    fprintf(stderr, "[Logger] WARNING: %llu log messages dropped due to full queue\n",
+                            (unsigned long long)d);
+                }
             } else {
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }
