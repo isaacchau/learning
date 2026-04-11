@@ -293,9 +293,12 @@ struct MsgClientStats {
 2. Non-Linux shutdown may hang (30s timeout)
 3. No TLS/SSL (documented limitation)
 
-### Low Issues (Cosmetic)
-1. Unused variable `stats_last_seq` in test server
-2. Some unused functions (isRunning, capacity, full)
+### Low Issues (Fixed)
+1. ✅ ~~Unused variable `stats_last_seq` in test server~~ - Fixed
+2. ✅ ~~CLI exception safety~~ - All `std::stoi`/`stoull` calls wrapped in try/catch
+3. ✅ ~~Log directory permissions~~ - Changed from `0777` to `0750`
+4. ✅ ~~Terminal mode RAII~~ - Added `TerminalModeGuard` to test server
+5. ✅ ~~`EINTR` handling~~ - Fixed in `sendAll()` and `accept()`
 
 ---
 
@@ -303,19 +306,23 @@ struct MsgClientStats {
 
 ### Required
 1. ✅ Code is production-ready as-is
-2. ⚠️ Monitor pool statistics for exhaustion
-3. ⚠️ Set up log rotation
+2. ✅ Hot-path performance fixes applied (`getenv` caching, `shared_ptr` moves)
+3. ⚠️ Monitor pool statistics for exhaustion
+4. ⚠️ Set up log rotation
 
 ### Recommended
-1. Add metrics export (Prometheus/StatsD)
-2. Add health check endpoint
-3. Run ThreadSanitizer in CI
-4. Document memory requirements
+1. ✅ Exception safety on all CLI parsing (fixed)
+2. ✅ Secure log directory permissions (fixed)
+3. Add metrics export (Prometheus/StatsD)
+4. Add health check endpoint
+5. Run ThreadSanitizer in CI
+6. Document memory requirements
 
 ### Optional
-1. Add TLS wrapper for encryption
-2. Implement work-stealing for workers
-3. Add circuit breaker for reconnection
+1. Add `ntohs`/`ntohl` for cross-architecture compatibility
+2. Add TLS wrapper for encryption
+3. Implement work-stealing for workers
+4. Add circuit breaker for reconnection
 
 ---
 
