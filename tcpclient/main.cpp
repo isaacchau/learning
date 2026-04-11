@@ -1,6 +1,7 @@
 #include "log_msg.h"
 #include "msg_client.h"
 #include "config_parser.h"
+#include "aggregation/aggregation_config.h"
 
 #include <atomic>
 #include <chrono>
@@ -288,6 +289,22 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Error: Invalid log syslog level: %s\n", argv[i]);
         return 1;
       }
+    } else if (strcmp(argv[i], "--aggregation") == 0) {
+      config.aggregation_config.enabled = true;
+    } else if ((strcmp(argv[i], "--agg-window") == 0) && i + 1 < argc) {
+      try {
+        config.aggregation_config.window_ms = std::stoull(argv[++i]);
+        config.aggregation_config.enabled = true;  // Enable if window specified
+      } catch (...) {
+        fprintf(stderr, "Error: Invalid aggregation window: %s\n", argv[i]);
+        return 1;
+      }
+    } else if ((strcmp(argv[i], "--agg-format") == 0) && i + 1 < argc) {
+      config.aggregation_config.output_format = aggregation::parseOutputFormat(argv[++i]);
+    } else if ((strcmp(argv[i], "--agg-output") == 0) && i + 1 < argc) {
+      config.aggregation_config.output_dir = argv[++i];
+    } else if ((strcmp(argv[i], "--agg-prefix") == 0) && i + 1 < argc) {
+      config.aggregation_config.filename_prefix = argv[++i];
     } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
       printUsage(argv[0]);
       return 0;
@@ -336,6 +353,15 @@ int main(int argc, char *argv[]) {
   // Ignore SIGPIPE (broken pipe on send)
   signal(SIGPIPE, SIG_IGN);
 
+  // Validate aggregation config if enabled
+  if (config.aggregation_config.enabled) {
+    std::string agg_error = config.aggregation_config.validate();
+    if (!agg_error.empty()) {
+      fprintf(stderr, "Aggregation configuration error: %s\n", agg_error.c_str());
+      return 1;
+    }
+  }
+
   // Print configuration
   LOG_INFO("=== MsgClient Configuration ===");
   LOG_INFO("  Workers:        %zu", config.worker_thread_count);
@@ -350,6 +376,15 @@ int main(int argc, char *argv[]) {
     LOG_INFO("    [%zu] %s:%u (item='%s', client='%s', seq=%lu)",
              i, conn.host.c_str(), conn.port, conn.item_name.c_str(),
              conn.client_id.c_str(), conn.starting_seq_num);
+  }
+  
+  // Print aggregation config
+  LOG_INFO("  Aggregation:    %s", config.aggregation_config.enabled ? "enabled" : "disabled");
+  if (config.aggregation_config.enabled) {
+    LOG_INFO("    Window:       %lu ms", config.aggregation_config.window_ms);
+    LOG_INFO("    Format:       %s", aggregation::outputFormatToString(config.aggregation_config.output_format));
+    LOG_INFO("    Output Dir:   %s", config.aggregation_config.output_dir.c_str());
+    LOG_INFO("    Prefix:       %s", config.aggregation_config.filename_prefix.c_str());
   }
   LOG_INFO("================================");
 

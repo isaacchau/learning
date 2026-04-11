@@ -214,6 +214,30 @@ MsgClient::MsgClient(const MsgClientConfig& config)
     } else {
         LOG_INFO("[MsgClient] Epoll instance created (fd=%d)", epoll_fd_.load());
     }
+    
+    // Initialize aggregation components if enabled
+    if (config_.aggregation_config.enabled) {
+        // Create output queue
+        output_queue_.reset(new aggregation::OutputQueue());
+        
+        // Create aggregation manager
+        aggregation_manager_.reset(new aggregation::AggregationManager(config_.aggregation_config));
+        aggregation_manager_->setOutputQueue(output_queue_.get());
+        
+        // Create output writer
+        aggregation::OutputWriter::Config writer_config;
+        writer_config.output_dir = config_.aggregation_config.output_dir;
+        writer_config.filename_prefix = config_.aggregation_config.filename_prefix;
+        writer_config.format = config_.aggregation_config.output_format;
+        writer_config.max_file_size_mb = 100;  // Default 100MB
+        
+        output_writer_.reset(new aggregation::OutputWriter(writer_config, output_queue_.get()));
+        
+        LOG_INFO("[MsgClient] Aggregation enabled: window_ms=%lu, format=%s, output=%s",
+                 config_.aggregation_config.window_ms,
+                 aggregation::outputFormatToString(config_.aggregation_config.output_format),
+                 config_.aggregation_config.output_dir.c_str());
+    }
 }
 
 MsgClient::~MsgClient() {
@@ -253,6 +277,15 @@ void MsgClient::start() {
 
     // Launch IO thread
     io_thread_ = std::thread(&MsgClient::ioLoop, this);
+    
+    // Start aggregation components if enabled
+    if (aggregation_manager_) {
+        aggregation_manager_->init();
+        aggregation_manager_->start();
+    }
+    if (output_writer_) {
+        output_writer_->start();
+    }
 
     LOG_INFO("[MsgClient] Started with %zu connection(s), %zu worker thread(s)",
              connections_.size(), config_.worker_thread_count);
@@ -269,6 +302,14 @@ void MsgClient::stop() {
     int epoll_fd_local = epoll_fd_.exchange(-1);
     if (epoll_fd_local >= 0) {
         ::close(epoll_fd_local);
+    }
+
+    // Stop aggregation components first (before workers finish)
+    if (aggregation_manager_) {
+        aggregation_manager_->stop();
+    }
+    if (output_writer_) {
+        output_writer_->stop();
     }
 
     // Join all threads gracefully.  All blocking syscalls now have timeouts
@@ -798,6 +839,14 @@ void MsgClient::workerLoop(size_t worker_index) {
     while (running_.load()) {
         if (!decoded_queues_[worker_index]->pop_wait(msg, Defaults::QUEUE_POP_TIMEOUT_MS)) {
             continue; // Timeout — re-check running_
+        }
+        
+        // Process for aggregation if enabled
+        if (aggregation_manager_) {
+            // SubMessage body points to the market data message
+            // Skip TcpResponse + MsgHdr headers to get to actual message
+            // The message body starts at msg.body (after headers)
+            aggregation_manager_->processMessage(msg.body, msg.body_length);
         }
 
         // Invoke handler with connection_id

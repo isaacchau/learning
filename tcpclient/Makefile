@@ -17,7 +17,11 @@ TARGET_SERVER = msg_test_server
 TARGET_DEBUG  = msg_client_debug
 
 # Source files
-CLIENT_SRCS = main.cpp msg_client.cpp log_msg.cpp config_parser.cpp
+CLIENT_SRCS = main.cpp msg_client.cpp log_msg.cpp config_parser.cpp \
+              aggregation/aggregation_manager.cpp \
+              aggregation/output_queue.cpp \
+              aggregation/output_formatter.cpp \
+              aggregation/output_writer.cpp
 SERVER_SRCS = msg_test_server.cpp log_msg.cpp
 
 # Object files (Separate them to speed up recompilation!)
@@ -26,7 +30,11 @@ SERVER_OBJS = $(SERVER_SRCS:.cpp=.o)
 DEBUG_OBJS  = $(CLIENT_SRCS:.cpp=.dbg.o)
 
 # Headers for dependency tracking
-HEADERS  = lockfree_ringbuffer.h shared_ptr_pool.h protocol.h msg_client.h log_msg.h config_parser.h json.hpp
+HEADERS  = lockfree_ringbuffer.h shared_ptr_pool.h protocol.h msg_client.h log_msg.h config_parser.h json.hpp \
+           aggregation/aggregation_config.h aggregation/aggregation_state.h \
+           aggregation/aggregation_manager.h aggregation/output_record.h \
+           aggregation/output_queue.h aggregation/output_formatter.h \
+           aggregation/output_writer.h market_data/message_types.h
 
 # Test files
 TEST_SRC   = tests/test_main.cpp

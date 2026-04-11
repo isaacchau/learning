@@ -1,6 +1,7 @@
 #include "config_parser.h"
 #include "json.hpp"
 #include "log_msg.h"
+#include "aggregation/aggregation_config.h"
 #include <fstream>
 #include <sstream>
 #include <algorithm>
@@ -265,6 +266,57 @@ bool parseConfigFile(const std::string& filepath,
             }
 
             config.connections.push_back(conn_config);
+        }
+    }
+
+    // Parse aggregation configuration (optional)
+    if (j.contains("aggregation")) {
+        const auto& agg = j["aggregation"];
+        
+        if (!agg.is_object()) {
+            error_message = "'aggregation' must be an object";
+            return false;
+        }
+        
+        try {
+            if (agg.contains("enabled")) {
+                config.aggregation_config.enabled = agg["enabled"].get<bool>();
+            }
+            if (agg.contains("window_ms")) {
+                config.aggregation_config.window_ms = agg["window_ms"].get<uint64_t>();
+            }
+            if (agg.contains("output_format")) {
+                if (!agg["output_format"].is_string()) {
+                    error_message = "aggregation.output_format must be a string";
+                    return false;
+                }
+                config.aggregation_config.output_format = 
+                    aggregation::parseOutputFormat(agg["output_format"].get<std::string>());
+            }
+            if (agg.contains("output_dir")) {
+                if (!agg["output_dir"].is_string()) {
+                    error_message = "aggregation.output_dir must be a string";
+                    return false;
+                }
+                config.aggregation_config.output_dir = agg["output_dir"].get<std::string>();
+            }
+            if (agg.contains("filename_prefix")) {
+                if (!agg["filename_prefix"].is_string()) {
+                    error_message = "aggregation.filename_prefix must be a string";
+                    return false;
+                }
+                config.aggregation_config.filename_prefix = agg["filename_prefix"].get<std::string>();
+            }
+        } catch (const json::type_error& e) {
+            error_message = std::string("Type error in 'aggregation' section: ") + e.what();
+            return false;
+        }
+        
+        // Validate aggregation config
+        std::string agg_error = config.aggregation_config.validate();
+        if (!agg_error.empty()) {
+            error_message = "aggregation: " + agg_error;
+            return false;
         }
     }
 

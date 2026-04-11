@@ -14,6 +14,12 @@
 #include "shared_ptr_pool.h"
 #include "protocol.h"
 
+// Aggregation support
+#include "aggregation/aggregation_config.h"
+#include "aggregation/aggregation_manager.h"
+#include "aggregation/output_queue.h"
+#include "aggregation/output_writer.h"
+
 #include <sys/socket.h>  // For shutdown(), SHUT_RDWR
 #include <unistd.h>      // For close()
 
@@ -190,6 +196,9 @@ struct MsgClientConfig {
     // Memory pool configuration
     std::vector<SizeClassConfig> pool_config; // Empty = use defaults
     
+    // Aggregation configuration
+    aggregation::AggregationConfig aggregation_config;
+    
     // Add a connection (convenience method)
     void addConnection(const ConnectionConfig& conn);
     void addConnection(const std::string& host, uint16_t port, 
@@ -352,6 +361,11 @@ private:
     int    tcp_keepintvl_ = 0;
     int    tcp_keepcnt_ = 0;
     int    tcp_rcvbuf_ = 0;
+    
+    // Aggregation components
+    std::unique_ptr<aggregation::AggregationManager> aggregation_manager_;
+    std::unique_ptr<aggregation::OutputQueue> output_queue_;
+    std::unique_ptr<aggregation::OutputWriter> output_writer_;
 };
 
 #endif // MSG_CLIENT_H

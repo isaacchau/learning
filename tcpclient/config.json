@@ -26,7 +26,14 @@
     "class_5": {
       "initial": 512,
       "max_free": 1024,
-      "max_total": 8192
+      "max_total": 163884
     }
+  },
+  "aggregation": {
+    "enabled": false,
+    "window_ms": 1000,
+    "output_format": "influxdb_line",
+    "output_dir": "./output",
+    "filename_prefix": "marketdata"
   }
 }
