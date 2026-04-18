@@ -94,28 +94,35 @@ namespace {
             const auto& conn = config.connections[i];
             std::string prefix = "connections[" + std::to_string(i) + "]";
             
-            if (!validateNotEmpty(prefix + ".host", conn.host, error)) {
+            if (conn.endpoints.empty()) {
+                error = prefix + ": at least one endpoint required";
                 return false;
             }
-            
-            if (!validateRangeInt(prefix + ".port", conn.port,
-                                 Defaults::MIN_PORT, Defaults::MAX_PORT, error)) {
-                return false;
+            for (size_t j = 0; j < conn.endpoints.size(); ++j) {
+                const auto& ep = conn.endpoints[j];
+                std::string ep_prefix = prefix + ".endpoints[" + std::to_string(j) + "]";
+                if (!validateNotEmpty(ep_prefix + ".host", ep.host, error)) {
+                    return false;
+                }
+                if (!validateRangeInt(ep_prefix + ".port", ep.port,
+                                     Defaults::MIN_PORT, Defaults::MAX_PORT, error)) {
+                    return false;
+                }
             }
-            
+
             if (!validateNotEmpty(prefix + ".item_name", conn.item_name, error)) {
                 return false;
             }
-            
+
             if (!validateMaxLength(prefix + ".item_name", conn.item_name,
                                   Defaults::MAX_ITEM_NAME_LEN, error)) {
                 return false;
             }
-            
+
             if (!validateNotEmpty(prefix + ".client_id", conn.client_id, error)) {
                 return false;
             }
-            
+
             if (!validateMaxLength(prefix + ".client_id", conn.client_id,
                                   Defaults::MAX_CLIENT_ID_LEN, error)) {
                 return false;
@@ -226,22 +233,66 @@ bool parseConfigFile(const std::string& filepath,
             }
             
             ConnectionConfig conn_config;
-            
+
             try {
-                if (conn.contains("host")) {
-                    if (!conn["host"].is_string()) {
-                        error_message = "connections[" + std::to_string(i) + "].host must be a string";
+                // New format: "endpoints" array (takes precedence)
+                if (conn.contains("endpoints")) {
+                    if (!conn["endpoints"].is_array()) {
+                        error_message = "connections[" + std::to_string(i) + "].endpoints must be an array";
                         return false;
                     }
-                    conn_config.host = conn["host"].get<std::string>();
+                    for (size_t j = 0; j < conn["endpoints"].size(); ++j) {
+                        const auto& ep = conn["endpoints"][j];
+                        if (!ep.is_object()) {
+                            error_message = "connections[" + std::to_string(i) + "].endpoints[" +
+                                           std::to_string(j) + "] must be an object";
+                            return false;
+                        }
+                        EndpointConfig ep_cfg;
+                        if (ep.contains("host")) {
+                            if (!ep["host"].is_string()) {
+                                error_message = "connections[" + std::to_string(i) + "].endpoints[" +
+                                               std::to_string(j) + "].host must be a string";
+                                return false;
+                            }
+                            ep_cfg.host = ep["host"].get<std::string>();
+                        }
+                        if (ep.contains("port")) {
+                            int port_val = ep["port"].get<int>();
+                            if (!validateRangeInt("connections[" + std::to_string(i) + "].endpoints[" +
+                                                 std::to_string(j) + "].port",
+                                                 port_val, Defaults::MIN_PORT, Defaults::MAX_PORT, error_message)) {
+                                return false;
+                            }
+                            ep_cfg.port = static_cast<uint16_t>(port_val);
+                        }
+                        conn_config.endpoints.push_back(ep_cfg);
+                    }
                 }
-                if (conn.contains("port")) {
-                    int port_val = conn["port"].get<int>();
-                    if (!validateRangeInt("connections[" + std::to_string(i) + "].port", 
-                                         port_val, Defaults::MIN_PORT, Defaults::MAX_PORT, error_message)) {
-                        return false;
+
+                // Legacy format: single "host" + "port" (backward compatible)
+                if (conn_config.endpoints.empty()) {
+                    if (conn.contains("host")) {
+                        if (!conn["host"].is_string()) {
+                            error_message = "connections[" + std::to_string(i) + "].host must be a string";
+                            return false;
+                        }
+                        std::string h = conn["host"].get<std::string>();
+                        uint16_t p = Defaults::PORT;
+                        if (conn.contains("port")) {
+                            int port_val = conn["port"].get<int>();
+                            if (!validateRangeInt("connections[" + std::to_string(i) + "].port",
+                                                 port_val, Defaults::MIN_PORT, Defaults::MAX_PORT, error_message)) {
+                                return false;
+                            }
+                            p = static_cast<uint16_t>(port_val);
+                        }
+                        conn_config.endpoints.push_back({h, p});
                     }
-                    conn_config.port = static_cast<uint16_t>(port_val);
+                }
+
+                if (conn.contains("failover_retries")) {
+                    conn_config.max_retries_per_endpoint = conn["failover_retries"].get<int>();
                 }
                 if (conn.contains("item")) {
                     if (!conn["item"].is_string()) {
@@ -394,13 +445,18 @@ void printConfigFormat() {
         "  // TCP connections (up to 64)\n"
         "  \"connections\": [\n"
         "    {\n"
-        "      \"host\": \"server1.example.com\",\n"
-        "      \"port\": 8888,                 // Port (1-65535)\n"
+        "      // Multi-endpoint with failover (new format)\n"
+        "      \"endpoints\": [\n"
+        "        {\"host\": \"primary.example.com\", \"port\": 8888},\n"
+        "        {\"host\": \"backup.example.com\",  \"port\": 8888}\n"
+        "      ],\n"
+        "      \"failover_retries\": 2,          // Retries before failover\n"
         "      \"item\": \"AAPL\",              // Item name (max 32 chars)\n"
         "      \"client_id\": \"Client1\",      // Client ID (max 32 chars)\n"
         "      \"starting_seq\": 0             // Starting sequence number\n"
         "    },\n"
         "    {\n"
+        "      // Single endpoint (legacy format, still supported)\n"
         "      \"host\": \"server2.example.com\",\n"
         "      \"port\": 8889,\n"
         "      \"item\": \"MSFT\",\n"
@@ -430,5 +486,6 @@ void printConfigFormat() {
         "- port: 1-65535\n"
         "- item_name, client_id: non-empty, max 32 chars\n"
         "- max_connections: 1-64\n"
+        "- max_retries_per_endpoint: >= 1\n"
     );
 }

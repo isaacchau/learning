@@ -26,35 +26,44 @@
 // ============================================================================
 
 std::string ConnectionConfig::validate() const {
-    // Host validation
-    if (host.empty()) {
-        return "Host cannot be empty";
+    // Endpoint validation
+    if (endpoints.empty()) {
+        return "At least one endpoint must be configured";
     }
-    
-    // Port validation
-    if (port < Defaults::MIN_PORT || port > Defaults::MAX_PORT) {
-        return "Port must be between " + std::to_string(Defaults::MIN_PORT) + 
-               " and " + std::to_string(Defaults::MAX_PORT);
+    for (size_t i = 0; i < endpoints.size(); ++i) {
+        if (endpoints[i].host.empty()) {
+            return "Endpoint[" + std::to_string(i) + "]: host cannot be empty";
+        }
+        if (endpoints[i].port < Defaults::MIN_PORT || endpoints[i].port > Defaults::MAX_PORT) {
+            return "Endpoint[" + std::to_string(i) + "]: port must be between " +
+                   std::to_string(Defaults::MIN_PORT) + " and " +
+                   std::to_string(Defaults::MAX_PORT);
+        }
     }
-    
+
+    // Max retries validation
+    if (max_retries_per_endpoint < 1) {
+        return "max_retries_per_endpoint must be >= 1";
+    }
+
     // Item name validation (must fit in protocol's reqItem field)
     if (item_name.empty()) {
         return "Item name cannot be empty";
     }
     if (item_name.length() > Defaults::MAX_ITEM_NAME_LEN) {
-        return "Item name too long (max " + std::to_string(Defaults::MAX_ITEM_NAME_LEN) + 
+        return "Item name too long (max " + std::to_string(Defaults::MAX_ITEM_NAME_LEN) +
                " chars, got " + std::to_string(item_name.length()) + ")";
     }
-    
+
     // Client ID validation
     if (client_id.empty()) {
         return "Client ID cannot be empty";
     }
     if (client_id.length() > Defaults::MAX_CLIENT_ID_LEN) {
-        return "Client ID too long (max " + std::to_string(Defaults::MAX_CLIENT_ID_LEN) + 
+        return "Client ID too long (max " + std::to_string(Defaults::MAX_CLIENT_ID_LEN) +
                " chars, got " + std::to_string(client_id.length()) + ")";
     }
-    
+
     return "";
 }
 
@@ -66,13 +75,12 @@ void MsgClientConfig::addConnection(const ConnectionConfig& conn) {
     connections.push_back(conn);
 }
 
-void MsgClientConfig::addConnection(const std::string& host, uint16_t port, 
+void MsgClientConfig::addConnection(const std::string& host, uint16_t port,
                                      const std::string& item,
                                      const std::string& client_id,
                                      uint64_t start_seq) {
     ConnectionConfig conn;
-    conn.host = host;
-    conn.port = port;
+    conn.endpoints.push_back({host, port});
     conn.item_name = item;
     conn.client_id = client_id;
     conn.starting_seq_num = start_seq;
@@ -152,7 +160,23 @@ ConnectionState::ConnectionState(const ConnectionConfig& cfg)
     , messages_received_(0)
     , bytes_received_(0)
     , reconnect_count_(0)
+    , active_endpoint_idx(0)
+    , consecutive_failures_on_endpoint(0)
 {
+    resolved_endpoints.resize(cfg.endpoints.size());
+}
+
+const EndpointConfig& ConnectionState::activeEndpoint() const {
+    return config.endpoints[active_endpoint_idx];
+}
+
+const ResolvedEndpoint& ConnectionState::activeResolved() const {
+    return resolved_endpoints[active_endpoint_idx];
+}
+
+bool ConnectionState::hasResolvedEndpoint() const {
+    return active_endpoint_idx < resolved_endpoints.size()
+        && resolved_endpoints[active_endpoint_idx].resolved;
 }
 
 // ============================================================================
@@ -258,9 +282,8 @@ void MsgClient::start() {
     // Resolve hostnames on the main thread before any worker threads start.
     for (size_t i = 0; i < connections_.size(); ++i) {
         if (!resolveHost(i)) {
-            LOG_ERR("[MsgClient] Failed to resolve host for connection %zu (%s:%u). "
-                    "Client will retry during reconnection loop.",
-                    i, connections_[i]->config.host.c_str(), connections_[i]->config.port);
+            LOG_ERR("[MsgClient] Failed to resolve any endpoint for connection %zu. "
+                    "Client will retry during reconnection loop.", i);
         }
     }
 
@@ -348,7 +371,13 @@ StatsSnapshot MsgClient::getStats() const {
         cs.reconnect_count = connections_[i]->reconnect_count_.load(std::memory_order_relaxed);
         cs.last_seq_num = connections_[i]->last_received_seq_.load(std::memory_order_relaxed);
         cs.connected = connections_[i]->socket_guard.valid();
-        cs.endpoint = connections_[i]->config.host + ":" + std::to_string(connections_[i]->config.port);
+        const auto& conn = *connections_[i];
+        if (conn.active_endpoint_idx < conn.config.endpoints.size()) {
+            const auto& ep = conn.activeEndpoint();
+            cs.endpoint = ep.host + ":" + std::to_string(ep.port);
+        } else {
+            cs.endpoint = "unknown";
+        }
         cs.item_name = connections_[i]->config.item_name;
         snap.connection_stats.push_back(cs);
     }
@@ -368,28 +397,49 @@ bool MsgClient::isRunning() const {
 // Connection Helpers
 // ============================================================================
 
-bool MsgClient::resolveHost(size_t conn_idx) {
+bool MsgClient::resolveEndpoint(size_t conn_idx, size_t ep_idx) {
     if (conn_idx >= connections_.size()) return false;
-
     ConnectionState& conn = *connections_[conn_idx];
+    if (ep_idx >= conn.config.endpoints.size()) return false;
 
+    const auto& ep = conn.config.endpoints[ep_idx];
     struct addrinfo hints, *result = nullptr;
     std::memset(&hints, 0, sizeof(hints));
     hints.ai_family   = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_protocol = IPPROTO_TCP;
 
-    std::string port_str = std::to_string(conn.config.port);
-    int rc = ::getaddrinfo(conn.config.host.c_str(), port_str.c_str(), &hints, &result);
+    std::string port_str = std::to_string(ep.port);
+    int rc = ::getaddrinfo(ep.host.c_str(), port_str.c_str(), &hints, &result);
     if (rc != 0 || !result) {
-        LOG_ERR("[MsgClient][Conn %zu] getaddrinfo failed: %s", conn_idx, gai_strerror(rc));
+        LOG_ERR("[MsgClient][Conn %zu][EP %zu] getaddrinfo failed for %s:%u: %s",
+                conn_idx, ep_idx, ep.host.c_str(), ep.port, gai_strerror(rc));
         return false;
     }
 
-    std::memcpy(&conn.resolved_addr, result->ai_addr, result->ai_addrlen);
-    conn.resolved_addr_len = result->ai_addrlen;
+    conn.resolved_endpoints[ep_idx].addr_len = result->ai_addrlen;
+    std::memcpy(&conn.resolved_endpoints[ep_idx].addr, result->ai_addr, result->ai_addrlen);
+    conn.resolved_endpoints[ep_idx].resolved = true;
     ::freeaddrinfo(result);
     return true;
+}
+
+bool MsgClient::resolveHost(size_t conn_idx) {
+    if (conn_idx >= connections_.size()) return false;
+
+    ConnectionState& conn = *connections_[conn_idx];
+    bool any_ok = false;
+
+    for (size_t i = 0; i < conn.config.endpoints.size(); ++i) {
+        if (resolveEndpoint(conn_idx, i)) {
+            any_ok = true;
+        }
+    }
+
+    if (!any_ok) {
+        LOG_ERR("[MsgClient][Conn %zu] Failed to resolve any endpoint", conn_idx);
+    }
+    return any_ok;
 }
 
 bool MsgClient::connectToServer(size_t conn_idx) {
@@ -397,8 +447,16 @@ bool MsgClient::connectToServer(size_t conn_idx) {
 
     ConnectionState& conn = *connections_[conn_idx];
 
-    if (conn.resolved_addr_len == 0) {
-        LOG_ERR("[MsgClient][Conn %zu] No resolved address available", conn_idx);
+    if (conn.active_endpoint_idx >= conn.config.endpoints.size()) {
+        LOG_ERR("[MsgClient][Conn %zu] Invalid active endpoint index %zu",
+                conn_idx, conn.active_endpoint_idx);
+        return false;
+    }
+
+    if (!conn.hasResolvedEndpoint()) {
+        LOG_ERR("[MsgClient][Conn %zu] No resolved address for active endpoint %zu (%s:%u)",
+                conn_idx, conn.active_endpoint_idx,
+                conn.activeEndpoint().host.c_str(), conn.activeEndpoint().port);
         return false;
     }
 
@@ -450,18 +508,24 @@ bool MsgClient::connectToServer(size_t conn_idx) {
                  conn_idx, actual_rcvbuf / 1024, tcp_rcvbuf_ / 1024, old_size / 1024);
     }
 
-    // Connect using pre-resolved address
-    int rc = ::connect(conn.socket_guard.get(), reinterpret_cast<struct sockaddr*>(&conn.resolved_addr), conn.resolved_addr_len);
+    // Connect using pre-resolved address of the active endpoint
+    const auto& resolved = conn.activeResolved();
+    int rc = ::connect(conn.socket_guard.get(),
+                       reinterpret_cast<const struct sockaddr*>(&resolved.addr),
+                       resolved.addr_len);
 
     if (rc < 0) {
-        LOG_ERR("[MsgClient][Conn %zu] connect() to %s:%u failed: %s",
-                conn_idx, conn.config.host.c_str(), conn.config.port, strerror(errno));
+        LOG_ERR("[MsgClient][Conn %zu] connect() to %s:%u (ep %zu) failed: %s",
+                conn_idx, conn.activeEndpoint().host.c_str(),
+                conn.activeEndpoint().port, conn.active_endpoint_idx, strerror(errno));
         conn.socket_guard.close();
         return false;
     }
 
-    LOG_INFO("[MsgClient][Conn %zu] Connected to %s:%u",
-             conn_idx, conn.config.host.c_str(), conn.config.port);
+    LOG_INFO("[MsgClient][Conn %zu] Connected to %s:%u (endpoint %zu/%zu)",
+             conn_idx, conn.activeEndpoint().host.c_str(),
+             conn.activeEndpoint().port, conn.active_endpoint_idx + 1,
+             conn.config.endpoints.size());
 
     // Add socket to epoll for efficient I/O multiplexing
     int epoll_fd_local = epoll_fd_.load();
@@ -523,6 +587,23 @@ void MsgClient::closeAllSockets() {
     }
 }
 
+void MsgClient::advanceToNextEndpoint(size_t conn_idx) {
+    if (conn_idx >= connections_.size()) return;
+    ConnectionState& conn = *connections_[conn_idx];
+
+    size_t old_idx = conn.active_endpoint_idx;
+    conn.active_endpoint_idx = (conn.active_endpoint_idx + 1) % conn.config.endpoints.size();
+    conn.consecutive_failures_on_endpoint = 0;
+    conn.current_reconnect_delay_ms_ = config_.reconnect_interval_ms;  // reset backoff
+
+    const auto& old_ep = conn.config.endpoints[old_idx];
+    const auto& new_ep = conn.config.endpoints[conn.active_endpoint_idx];
+    LOG_INFO("[MsgClient][Conn %zu] Failover: %s:%u -> %s:%u (ep %zu -> %zu)",
+             conn_idx, old_ep.host.c_str(), old_ep.port,
+             new_ep.host.c_str(), new_ep.port,
+             old_idx + 1, conn.active_endpoint_idx + 1);
+}
+
 // ============================================================================
 // IO Thread: manage multiple connections with poll()
 // ============================================================================
@@ -548,35 +629,43 @@ void MsgClient::ioLoop() {
         for (size_t i = 0; i < connections_.size(); ++i) {
             if (!connected[i] && running_.load()) {
                 ConnectionState& conn = *connections_[i];
-                
-                if (!connectToServer(i)) {
-                    LOG_INFO("[MsgClient][Conn %zu] Connection failed, retrying in %d ms...", 
-                             i, conn.current_reconnect_delay_ms_);
-                    std::this_thread::sleep_for(
-                        std::chrono::milliseconds(conn.current_reconnect_delay_ms_));
+
+                auto handleConnectFailure = [&](const char* reason) {
+                    conn.consecutive_failures_on_endpoint++;
                     conn.reconnect_count_.fetch_add(1, std::memory_order_relaxed);
                     stats_.reconnect_count.fetch_add(1, std::memory_order_relaxed);
-                    conn.current_reconnect_delay_ms_ = std::min(
-                        static_cast<int>(conn.current_reconnect_delay_ms_ * Defaults::RECONNECT_BACKOFF_MULT),
-                        Defaults::RECONNECT_MAX_MS);
+
+                    if (conn.consecutive_failures_on_endpoint >= conn.config.max_retries_per_endpoint
+                        && conn.config.endpoints.size() > 1) {
+                        advanceToNextEndpoint(i);
+                    } else {
+                        conn.current_reconnect_delay_ms_ = std::min(
+                            static_cast<int>(conn.current_reconnect_delay_ms_ * Defaults::RECONNECT_BACKOFF_MULT),
+                            Defaults::RECONNECT_MAX_MS);
+                    }
+
+                    LOG_INFO("[MsgClient][Conn %zu] %s on %s:%u (failure %d/%d), retrying in %d ms...",
+                             i, reason,
+                             conn.activeEndpoint().host.c_str(), conn.activeEndpoint().port,
+                             conn.consecutive_failures_on_endpoint,
+                             conn.config.max_retries_per_endpoint,
+                             conn.current_reconnect_delay_ms_);
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(conn.current_reconnect_delay_ms_));
+                };
+
+                if (!connectToServer(i)) {
+                    handleConnectFailure("Connection failed");
                     continue;
                 }
 
-                // Reset backoff and health check timer on successful connection
-                conn.current_reconnect_delay_ms_ = config_.reconnect_interval_ms;
+                // Reset health check timer on successful TCP connection
                 conn.last_recv_time_ = std::chrono::steady_clock::now();
 
-                // Send subscription request
+                // Send subscription request (includes last-received seq for resume)
                 if (!sendSubscription(i)) {
-                    LOG_ERR("[MsgClient][Conn %zu] Failed to send subscription, reconnecting...", i);
                     closeConnection(i);
-                    std::this_thread::sleep_for(
-                        std::chrono::milliseconds(conn.current_reconnect_delay_ms_));
-                    conn.reconnect_count_.fetch_add(1, std::memory_order_relaxed);
-                    stats_.reconnect_count.fetch_add(1, std::memory_order_relaxed);
-                    conn.current_reconnect_delay_ms_ = std::min(
-                        static_cast<int>(conn.current_reconnect_delay_ms_ * Defaults::RECONNECT_BACKOFF_MULT),
-                        Defaults::RECONNECT_MAX_MS);
+                    handleConnectFailure("Subscription failed");
                     continue;
                 }
 
@@ -585,15 +674,18 @@ void MsgClient::ioLoop() {
                 if (!recv_states[i].recv_buf) {
                     LOG_ERR("[MsgClient][Conn %zu] Failed to allocate receive buffer, reconnecting...", i);
                     closeConnection(i);
-                    std::this_thread::sleep_for(
-                        std::chrono::milliseconds(conn.current_reconnect_delay_ms_));
-                    conn.current_reconnect_delay_ms_ = std::min(
-                        static_cast<int>(conn.current_reconnect_delay_ms_ * Defaults::RECONNECT_BACKOFF_MULT),
-                        Defaults::RECONNECT_MAX_MS);
+                    handleConnectFailure("Buffer allocation failed");
                     continue;
                 }
                 recv_states[i].recv_used = 0;
+
+                // Success: reset failure counter and backoff
+                conn.consecutive_failures_on_endpoint = 0;
+                conn.current_reconnect_delay_ms_ = config_.reconnect_interval_ms;
                 connected[i] = true;
+
+                LOG_INFO("[MsgClient][Conn %zu] Stream active on %s:%u",
+                         i, conn.activeEndpoint().host.c_str(), conn.activeEndpoint().port);
             }
         }
 

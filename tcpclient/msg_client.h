@@ -120,7 +120,10 @@ namespace Defaults {
     // Default: 0 (disabled) - accommodates busy/quiet periods during the day.
     // If enabled, force reconnect if no data for specified milliseconds.
     constexpr int           CONN_IDLE_TIMEOUT_MS = 0;
-    
+
+    // Failover: max retries on same endpoint before switching to next
+    constexpr int           MAX_RETRIES_PER_ENDPOINT = 2;
+
     // Push wait timeout for queues (when full)
     // NOTE: This uses a "drop" strategy rather than backpressure.
     // 
@@ -158,16 +161,26 @@ namespace Defaults {
 }
 
 // ============================================================================
+// Endpoint Configuration (one IP:port pair)
+// ============================================================================
+
+struct EndpointConfig {
+    std::string host;
+    uint16_t    port;
+};
+
+// ============================================================================
 // Per-Connection Configuration
 // ============================================================================
 
 struct ConnectionConfig {
-    std::string host                    = Defaults::HOST;
-    uint16_t    port                    = Defaults::PORT;
+    std::vector<EndpointConfig> endpoints;
+    uint16_t    default_port            = Defaults::PORT;  // fallback for host entries without :port
+    int         max_retries_per_endpoint= Defaults::MAX_RETRIES_PER_ENDPOINT;
     std::string item_name               = Defaults::ITEM_NAME;
     std::string client_id               = Defaults::CLIENT_ID;
     uint64_t    starting_seq_num        = Defaults::STARTING_SEQ_NUM;
-    
+
     // Validate this connection configuration
     std::string validate() const;
 };
@@ -211,6 +224,16 @@ struct MsgClientConfig {
 };
 
 // ============================================================================
+// Resolved endpoint (cached getaddrinfo result)
+// ============================================================================
+
+struct ResolvedEndpoint {
+    struct sockaddr_storage addr{};
+    socklen_t addr_len = 0;
+    bool resolved = false;
+};
+
+// ============================================================================
 // Per-Connection State
 // ============================================================================
 
@@ -224,10 +247,17 @@ struct ConnectionState {
     std::atomic<uint64_t> bytes_received_;      // Bytes received on this connection
     std::atomic<uint64_t> reconnect_count_;     // Reconnect count for this connection
 
-    struct sockaddr_storage resolved_addr{};    // Pre-resolved address
-    socklen_t resolved_addr_len = 0;            // Length of resolved address
+    // Failover state
+    size_t active_endpoint_idx = 0;             // Currently active endpoint
+    int consecutive_failures_on_endpoint = 0;   // Failures on current endpoint since last success
+    std::vector<ResolvedEndpoint> resolved_endpoints; // One per config endpoint
 
     ConnectionState(const ConnectionConfig& cfg);
+
+    // Current endpoint accessors
+    const EndpointConfig& activeEndpoint() const;
+    const ResolvedEndpoint& activeResolved() const;
+    bool hasResolvedEndpoint() const;
 
     // Disable copy and move - stored via unique_ptr
     ConnectionState(const ConnectionState&) = delete;
@@ -316,11 +346,15 @@ private:
     void workerLoop(size_t worker_index);
 
     // Connection helpers
-    bool resolveHost(size_t conn_idx);
-    bool connectToServer(size_t conn_idx);
+    bool resolveHost(size_t conn_idx);              // Resolve ALL endpoints for a connection
+    bool resolveEndpoint(size_t conn_idx, size_t ep_idx); // Resolve single endpoint
+    bool connectToServer(size_t conn_idx);          // Connect to active endpoint
     bool sendSubscription(size_t conn_idx);
     void closeConnection(size_t conn_idx);
     void closeAllSockets();
+
+    // Failover: advance to next endpoint after max retries
+    void advanceToNextEndpoint(size_t conn_idx);
 
     // Configuration
     MsgClientConfig config_;
