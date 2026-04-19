@@ -235,30 +235,33 @@ bool parseConfigFile(const std::string& filepath,
             ConnectionConfig conn_config;
 
             try {
-                // New format: "endpoints" array (takes precedence)
-                if (conn.contains("endpoints")) {
-                    if (!conn["endpoints"].is_array()) {
+                auto it_endpoints = conn.find("endpoints");
+                if (it_endpoints != conn.end()) {
+                    const auto& endpoints = *it_endpoints;
+                    if (!endpoints.is_array()) {
                         error_message = "connections[" + std::to_string(i) + "].endpoints must be an array";
                         return false;
                     }
-                    for (size_t j = 0; j < conn["endpoints"].size(); ++j) {
-                        const auto& ep = conn["endpoints"][j];
+                    for (size_t j = 0; j < endpoints.size(); ++j) {
+                        const auto& ep = endpoints[j];
                         if (!ep.is_object()) {
                             error_message = "connections[" + std::to_string(i) + "].endpoints[" +
                                            std::to_string(j) + "] must be an object";
                             return false;
                         }
                         EndpointConfig ep_cfg;
-                        if (ep.contains("host")) {
-                            if (!ep["host"].is_string()) {
+                        auto it_host = ep.find("host");
+                        if (it_host != ep.end()) {
+                            if (!it_host->is_string()) {
                                 error_message = "connections[" + std::to_string(i) + "].endpoints[" +
                                                std::to_string(j) + "].host must be a string";
                                 return false;
                             }
-                            ep_cfg.host = ep["host"].get<std::string>();
+                            ep_cfg.host = it_host->get<std::string>();
                         }
-                        if (ep.contains("port")) {
-                            int port_val = ep["port"].get<int>();
+                        auto it_port = ep.find("port");
+                        if (it_port != ep.end()) {
+                            int port_val = it_port->get<int>();
                             if (!validateRangeInt("connections[" + std::to_string(i) + "].endpoints[" +
                                                  std::to_string(j) + "].port",
                                                  port_val, Defaults::MIN_PORT, Defaults::MAX_PORT, error_message)) {
@@ -270,17 +273,18 @@ bool parseConfigFile(const std::string& filepath,
                     }
                 }
 
-                // Legacy format: single "host" + "port" (backward compatible)
                 if (conn_config.endpoints.empty()) {
-                    if (conn.contains("host")) {
-                        if (!conn["host"].is_string()) {
+                    auto it_host = conn.find("host");
+                    if (it_host != conn.end()) {
+                        if (!it_host->is_string()) {
                             error_message = "connections[" + std::to_string(i) + "].host must be a string";
                             return false;
                         }
-                        std::string h = conn["host"].get<std::string>();
+                        std::string h = it_host->get<std::string>();
                         uint16_t p = Defaults::PORT;
-                        if (conn.contains("port")) {
-                            int port_val = conn["port"].get<int>();
+                        auto it_port = conn.find("port");
+                        if (it_port != conn.end()) {
+                            int port_val = it_port->get<int>();
                             if (!validateRangeInt("connections[" + std::to_string(i) + "].port",
                                                  port_val, Defaults::MIN_PORT, Defaults::MAX_PORT, error_message)) {
                                 return false;
@@ -291,25 +295,29 @@ bool parseConfigFile(const std::string& filepath,
                     }
                 }
 
-                if (conn.contains("failover_retries")) {
-                    conn_config.max_retries_per_endpoint = conn["failover_retries"].get<int>();
+                auto it_failover = conn.find("failover_retries");
+                if (it_failover != conn.end()) {
+                    conn_config.max_retries_per_endpoint = it_failover->get<int>();
                 }
-                if (conn.contains("item")) {
-                    if (!conn["item"].is_string()) {
+                auto it_item = conn.find("item");
+                if (it_item != conn.end()) {
+                    if (!it_item->is_string()) {
                         error_message = "connections[" + std::to_string(i) + "].item must be a string";
                         return false;
                     }
-                    conn_config.item_name = conn["item"].get<std::string>();
+                    conn_config.item_name = it_item->get<std::string>();
                 }
-                if (conn.contains("client_id")) {
-                    if (!conn["client_id"].is_string()) {
+                auto it_client_id = conn.find("client_id");
+                if (it_client_id != conn.end()) {
+                    if (!it_client_id->is_string()) {
                         error_message = "connections[" + std::to_string(i) + "].client_id must be a string";
                         return false;
                     }
-                    conn_config.client_id = conn["client_id"].get<std::string>();
+                    conn_config.client_id = it_client_id->get<std::string>();
                 }
-                if (conn.contains("starting_seq")) {
-                    conn_config.starting_seq_num = conn["starting_seq"].get<uint64_t>();
+                auto it_seq = conn.find("starting_seq");
+                if (it_seq != conn.end()) {
+                    conn_config.starting_seq_num = it_seq->get<uint64_t>();
                 }
             } catch (const json::type_error& e) {
                 error_message = "Type error in connections[" + std::to_string(i) + "]: " + e.what();

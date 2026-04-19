@@ -93,6 +93,31 @@ static void printUsage(const char *prog) {
 }
 
 // ============================================================================
+// Env helpers
+// ============================================================================
+
+static std::string getEnvStr(const char* name, const char* def) {
+  const char* val = std::getenv(name);
+  return val ? val : def;
+}
+
+static int getEnvInt(const char* name, int def) {
+  const char* val = std::getenv(name);
+  if (val) {
+    try { return std::stoi(val); } catch (const std::exception&) {}
+  }
+  return def;
+}
+
+static uint64_t getEnvUll(const char* name, uint64_t def) {
+  const char* val = std::getenv(name);
+  if (val) {
+    try { return std::stoull(val); } catch (const std::exception&) {}
+  }
+  return def;
+}
+
+// ============================================================================
 // CLI helpers
 // ============================================================================
 
@@ -118,7 +143,7 @@ static void parseHostArg(const std::string& arg, ConnectionConfig& conn) {
         if (p >= Defaults::MIN_PORT && p <= Defaults::MAX_PORT) {
           port = static_cast<uint16_t>(p);
         }
-      } catch (...) {
+      } catch (const std::exception&) {
         // Not a valid port, treat whole thing as host
         host = part;
         port = 0;
@@ -145,31 +170,14 @@ static void finalizeConnection(ConnectionConfig& conn) {
 static ConnectionConfig makeDefaultConn() {
   ConnectionConfig c;
   c.default_port = static_cast<uint16_t>(
-      []() -> int {
-        const char* v = std::getenv("APP_TCP_CLIENT_PORT");
-        if (v) { try { return std::stoi(v); } catch (...) {} }
-        return Defaults::PORT;
-      }());
+      getEnvInt("APP_TCP_CLIENT_PORT", Defaults::PORT));
   c.endpoints.push_back({
-      []() -> std::string {
-        const char* v = std::getenv("APP_TCP_CLIENT_HOST");
-        return v ? v : Defaults::HOST;
-      }(),
+      getEnvStr("APP_TCP_CLIENT_HOST", Defaults::HOST),
       c.default_port
   });
-  c.item_name = []() -> std::string {
-    const char* v = std::getenv("APP_TCP_CLIENT_ITEM");
-    return v ? v : Defaults::ITEM_NAME;
-  }();
-  c.client_id = []() -> std::string {
-    const char* v = std::getenv("APP_TCP_CLIENT_CLIENT_ID");
-    return v ? v : Defaults::CLIENT_ID;
-  }();
-  c.starting_seq_num = []() -> uint64_t {
-    const char* v = std::getenv("APP_TCP_CLIENT_SEQ");
-    if (v) { try { return std::stoull(v); } catch (...) {} }
-    return Defaults::STARTING_SEQ_NUM;
-  }();
+  c.item_name = getEnvStr("APP_TCP_CLIENT_ITEM", Defaults::ITEM_NAME);
+  c.client_id = getEnvStr("APP_TCP_CLIENT_CLIENT_ID", Defaults::CLIENT_ID);
+  c.starting_seq_num = getEnvUll("APP_TCP_CLIENT_SEQ", Defaults::STARTING_SEQ_NUM);
   return c;
 }
 
@@ -178,19 +186,6 @@ static ConnectionConfig makeDefaultConn() {
 // ============================================================================
 
 int main(int argc, char *argv[]) {
-  // Environment parsing helpers
-  auto getEnvStr = [](const char *name, const char *def) -> std::string {
-    const char *val = std::getenv(name);
-    return val ? val : def;
-  };
-  auto getEnvInt = [](const char *name, int def) -> int {
-    const char *val = std::getenv(name);
-    if (val) {
-      try { return std::stoi(val); } catch (...) {}
-    }
-    return def;
-  };
-
   // First pass: check for --config argument
   std::string config_file;
   for (int i = 1; i < argc; ++i) {

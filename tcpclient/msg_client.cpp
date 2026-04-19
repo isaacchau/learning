@@ -594,7 +594,7 @@ void MsgClient::advanceToNextEndpoint(size_t conn_idx) {
     size_t old_idx = conn.active_endpoint_idx;
     conn.active_endpoint_idx = (conn.active_endpoint_idx + 1) % conn.config.endpoints.size();
     conn.consecutive_failures_on_endpoint = 0;
-    conn.current_reconnect_delay_ms_ = config_.reconnect_interval_ms;  // reset backoff
+    conn.current_reconnect_delay_ms_ = config_.reconnect_interval_ms;
 
     const auto& old_ep = conn.config.endpoints[old_idx];
     const auto& new_ep = conn.config.endpoints[conn.active_endpoint_idx];
@@ -602,6 +602,31 @@ void MsgClient::advanceToNextEndpoint(size_t conn_idx) {
              conn_idx, old_ep.host.c_str(), old_ep.port,
              new_ep.host.c_str(), new_ep.port,
              old_idx + 1, conn.active_endpoint_idx + 1);
+}
+
+void MsgClient::handleConnectFailure(size_t conn_idx, const char* reason) {
+    ConnectionState& conn = *connections_[conn_idx];
+    conn.consecutive_failures_on_endpoint++;
+    conn.reconnect_count_.fetch_add(1, std::memory_order_relaxed);
+    stats_.reconnect_count.fetch_add(1, std::memory_order_relaxed);
+
+    if (conn.consecutive_failures_on_endpoint >= conn.config.max_retries_per_endpoint
+        && conn.config.endpoints.size() > 1) {
+        advanceToNextEndpoint(conn_idx);
+    } else {
+        conn.current_reconnect_delay_ms_ = std::min(
+            static_cast<int>(conn.current_reconnect_delay_ms_ * Defaults::RECONNECT_BACKOFF_MULT),
+            Defaults::RECONNECT_MAX_MS);
+    }
+
+    LOG_INFO("[MsgClient][Conn %zu] %s on %s:%u (failure %d/%d), retrying in %d ms...",
+             conn_idx, reason,
+             conn.activeEndpoint().host.c_str(), conn.activeEndpoint().port,
+             conn.consecutive_failures_on_endpoint,
+             conn.config.max_retries_per_endpoint,
+             conn.current_reconnect_delay_ms_);
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(conn.current_reconnect_delay_ms_));
 }
 
 // ============================================================================
@@ -630,56 +655,28 @@ void MsgClient::ioLoop() {
             if (!connected[i] && running_.load()) {
                 ConnectionState& conn = *connections_[i];
 
-                auto handleConnectFailure = [&](const char* reason) {
-                    conn.consecutive_failures_on_endpoint++;
-                    conn.reconnect_count_.fetch_add(1, std::memory_order_relaxed);
-                    stats_.reconnect_count.fetch_add(1, std::memory_order_relaxed);
-
-                    if (conn.consecutive_failures_on_endpoint >= conn.config.max_retries_per_endpoint
-                        && conn.config.endpoints.size() > 1) {
-                        advanceToNextEndpoint(i);
-                    } else {
-                        conn.current_reconnect_delay_ms_ = std::min(
-                            static_cast<int>(conn.current_reconnect_delay_ms_ * Defaults::RECONNECT_BACKOFF_MULT),
-                            Defaults::RECONNECT_MAX_MS);
-                    }
-
-                    LOG_INFO("[MsgClient][Conn %zu] %s on %s:%u (failure %d/%d), retrying in %d ms...",
-                             i, reason,
-                             conn.activeEndpoint().host.c_str(), conn.activeEndpoint().port,
-                             conn.consecutive_failures_on_endpoint,
-                             conn.config.max_retries_per_endpoint,
-                             conn.current_reconnect_delay_ms_);
-                    std::this_thread::sleep_for(
-                        std::chrono::milliseconds(conn.current_reconnect_delay_ms_));
-                };
-
                 if (!connectToServer(i)) {
-                    handleConnectFailure("Connection failed");
+                    handleConnectFailure(i, "Connection failed");
                     continue;
                 }
 
-                // Reset health check timer on successful TCP connection
                 conn.last_recv_time_ = std::chrono::steady_clock::now();
 
-                // Send subscription request (includes last-received seq for resume)
                 if (!sendSubscription(i)) {
                     closeConnection(i);
-                    handleConnectFailure("Subscription failed");
+                    handleConnectFailure(i, "Subscription failed");
                     continue;
                 }
 
-                // Allocate receive buffer
                 recv_states[i].recv_buf = pool_->allocate(recv_buffer_size_);
                 if (!recv_states[i].recv_buf) {
                     LOG_ERR("[MsgClient][Conn %zu] Failed to allocate receive buffer, reconnecting...", i);
                     closeConnection(i);
-                    handleConnectFailure("Buffer allocation failed");
+                    handleConnectFailure(i, "Buffer allocation failed");
                     continue;
                 }
                 recv_states[i].recv_used = 0;
 
-                // Success: reset failure counter and backoff
                 conn.consecutive_failures_on_endpoint = 0;
                 conn.current_reconnect_delay_ms_ = config_.reconnect_interval_ms;
                 connected[i] = true;

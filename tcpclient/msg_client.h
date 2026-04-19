@@ -353,8 +353,9 @@ private:
     void closeConnection(size_t conn_idx);
     void closeAllSockets();
 
-    // Failover: advance to next endpoint after max retries
+    // Failover
     void advanceToNextEndpoint(size_t conn_idx);
+    void handleConnectFailure(size_t conn_idx, const char* reason);
 
     // Configuration
     MsgClientConfig config_;
