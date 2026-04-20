@@ -290,11 +290,12 @@ public:
         auto it = buckets_.begin();
         while (it != buckets_.end()) {
             if (it->second.bucket_ts <= cutoff) {
-                result.push_back(std::move(it->second));
                 if (clear_after_flush) {
+                    result.push_back(std::move(it->second));
                     it = buckets_.erase(it);
                 } else {
-                    // Reset fields but keep the bucket entry
+                    // Copy to result, then reset fields but keep the bucket entry
+                    result.push_back(it->second);
                     it->second.fields.clear();
                     ++it;
                 }
