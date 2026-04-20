@@ -1,7 +1,6 @@
 #include "log_msg.h"
 #include "msg_client.h"
 #include "config_parser.h"
-#include "aggregation/aggregation_config.h"
 
 #include <atomic>
 #include <chrono>
@@ -382,7 +381,12 @@ int main(int argc, char *argv[]) {
         return 1;
       }
     } else if ((strcmp(argv[i], "--agg-format") == 0) && i + 1 < argc) {
-      config.aggregation_config.output_format = aggregation::parseOutputFormat(argv[++i]);
+      std::string fmt = argv[++i];
+      if (fmt == "csv" || fmt == "CSV") {
+        config.aggregation_config.output_format = metrics::OutputFormat::CSV;
+      } else {
+        config.aggregation_config.output_format = metrics::OutputFormat::INFLUXDB_LINE;
+      }
     } else if ((strcmp(argv[i], "--agg-output") == 0) && i + 1 < argc) {
       config.aggregation_config.output_dir = argv[++i];
     } else if ((strcmp(argv[i], "--agg-prefix") == 0) && i + 1 < argc) {
@@ -466,7 +470,7 @@ int main(int argc, char *argv[]) {
   LOG_INFO("  Aggregation:    %s", config.aggregation_config.enabled ? "enabled" : "disabled");
   if (config.aggregation_config.enabled) {
     LOG_INFO("    Window:       %lu ms", config.aggregation_config.window_ms);
-    LOG_INFO("    Format:       %s", aggregation::outputFormatToString(config.aggregation_config.output_format));
+    LOG_INFO("    Format:       %s", config.aggregation_config.output_format == metrics::OutputFormat::CSV ? "csv" : "influxdb_line");
     LOG_INFO("    Output Dir:   %s", config.aggregation_config.output_dir.c_str());
     LOG_INFO("    Prefix:       %s", config.aggregation_config.filename_prefix.c_str());
   }

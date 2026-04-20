@@ -1,5 +1,6 @@
 #include "msg_client.h"
 #include "log_msg.h"
+#include "market_data/message_types.h"
 
 #include <cstdlib>
 #include <string>
@@ -241,26 +242,32 @@ MsgClient::MsgClient(const MsgClientConfig& config)
     
     // Initialize aggregation components if enabled
     if (config_.aggregation_config.enabled) {
-        // Create output queue
-        output_queue_.reset(new aggregation::OutputQueue());
-        
-        // Create aggregation manager
-        aggregation_manager_.reset(new aggregation::AggregationManager(config_.aggregation_config));
-        aggregation_manager_->setOutputQueue(output_queue_.get());
-        
-        // Create output writer
-        aggregation::OutputWriter::Config writer_config;
-        writer_config.output_dir = config_.aggregation_config.output_dir;
-        writer_config.filename_prefix = config_.aggregation_config.filename_prefix;
-        writer_config.format = config_.aggregation_config.output_format;
-        writer_config.max_file_size_mb = 100;  // Default 100MB
-        
-        output_writer_.reset(new aggregation::OutputWriter(writer_config, output_queue_.get()));
-        
-        LOG_INFO("[MsgClient] Aggregation enabled: window_ms=%lu, format=%s, output=%s",
+        disk_writer_.reset(new metrics::DiskWriter(config_.aggregation_config.output_dir));
+        disk_writer_->start();
+
+        uint64_t bucket_ns = config_.aggregation_config.window_ms * 1000000ULL;
+        size_t num_shards = std::thread::hardware_concurrency();
+        if (num_shards == 0) num_shards = 4;
+
+        orders_aggregator_.reset(new metrics::Aggregator(
+            "orders", config_.aggregation_config.filename_prefix,
+            bucket_ns, num_shards, true, config_.aggregation_config.output_format,
+            disk_writer_.get(), config_.aggregation_config.output_dir));
+
+        trades_aggregator_.reset(new metrics::Aggregator(
+            "trades", config_.aggregation_config.filename_prefix,
+            bucket_ns, num_shards, true, config_.aggregation_config.output_format,
+            disk_writer_.get(), config_.aggregation_config.output_dir));
+
+        quotes_aggregator_.reset(new metrics::Aggregator(
+            "quotes", config_.aggregation_config.filename_prefix,
+            bucket_ns, num_shards, true, config_.aggregation_config.output_format,
+            disk_writer_.get(), config_.aggregation_config.output_dir));
+
+        LOG_INFO("[MsgClient] Aggregation enabled: window_ms=%lu, format=%s, output=%s, shards=%zu",
                  config_.aggregation_config.window_ms,
-                 aggregation::outputFormatToString(config_.aggregation_config.output_format),
-                 config_.aggregation_config.output_dir.c_str());
+                 config_.aggregation_config.output_format == metrics::OutputFormat::CSV ? "csv" : "influxdb_line",
+                 config_.aggregation_config.output_dir.c_str(), num_shards);
     }
 }
 
@@ -301,14 +308,7 @@ void MsgClient::start() {
     // Launch IO thread
     io_thread_ = std::thread(&MsgClient::ioLoop, this);
     
-    // Start aggregation components if enabled
-    if (aggregation_manager_) {
-        aggregation_manager_->init();
-        aggregation_manager_->start();
-    }
-    if (output_writer_) {
-        output_writer_->start();
-    }
+    // Disk writer is already started in constructor; aggregators are passive
 
     LOG_INFO("[MsgClient] Started with %zu connection(s), %zu worker thread(s)",
              connections_.size(), config_.worker_thread_count);
@@ -327,12 +327,12 @@ void MsgClient::stop() {
         ::close(epoll_fd_local);
     }
 
-    // Stop aggregation components first (before workers finish)
-    if (aggregation_manager_) {
-        aggregation_manager_->stop();
-    }
-    if (output_writer_) {
-        output_writer_->stop();
+    // Flush aggregators and stop disk writer first (before workers finish)
+    if (orders_aggregator_) orders_aggregator_->forceFlush();
+    if (trades_aggregator_) trades_aggregator_->forceFlush();
+    if (quotes_aggregator_) quotes_aggregator_->forceFlush();
+    if (disk_writer_) {
+        disk_writer_->stop();
     }
 
     // Join all threads gracefully.  All blocking syscalls now have timeouts
@@ -931,11 +931,97 @@ void MsgClient::workerLoop(size_t worker_index) {
         }
         
         // Process for aggregation if enabled
-        if (aggregation_manager_) {
-            // SubMessage body points to the market data message
-            // Skip TcpResponse + MsgHdr headers to get to actual message
-            // The message body starts at msg.body (after headers)
-            aggregation_manager_->processMessage(msg.body, msg.body_length);
+        if (orders_aggregator_) {
+            MarketDataType msg_type = parseMessageType(msg.body, msg.body_length);
+            if (msg_type != MarketDataType::UNKNOWN) {
+                const MsgHeader* hdr = reinterpret_cast<const MsgHeader*>(msg.body);
+                uint64_t ts_ns = hdr->timestamp_ns;
+
+                switch (msg_type) {
+                    case MarketDataType::ORDER_NEW: {
+                        const auto* m = castMessage<OrderNewMsg>(msg.body, msg.body_length);
+                        if (m) {
+                            metrics::TagSet tags;
+                            tags.add("Market", m->getMarket());
+                            tags.add("Instrument", m->getInstrument());
+                            tags.add("Broker", m->getBroker());
+                            orders_aggregator_->add(tags, "newOrders", static_cast<int64_t>(1), ts_ns);
+                            orders_aggregator_->add(tags, "openOrders", static_cast<int64_t>(1), ts_ns);
+                            orders_aggregator_->add(tags, "totalOrderQty", static_cast<int64_t>(m->quantity), ts_ns);
+                            orders_aggregator_->onIncomingTimestamp(ts_ns);
+                        }
+                        break;
+                    }
+                    case MarketDataType::ORDER_UPDATE: {
+                        const auto* m = castMessage<OrderUpdateMsg>(msg.body, msg.body_length);
+                        if (m) {
+                            metrics::TagSet tags;
+                            tags.add("Market", m->getMarket());
+                            tags.add("Instrument", m->getInstrument());
+                            tags.add("Broker", m->getBroker());
+                            orders_aggregator_->add(tags, "modifiedOrders", static_cast<int64_t>(1), ts_ns);
+                            orders_aggregator_->onIncomingTimestamp(ts_ns);
+                        }
+                        break;
+                    }
+                    case MarketDataType::ORDER_CANCEL: {
+                        const auto* m = castMessage<OrderCancelMsg>(msg.body, msg.body_length);
+                        if (m) {
+                            metrics::TagSet tags;
+                            tags.add("Market", m->getMarket());
+                            tags.add("Instrument", m->getInstrument());
+                            tags.add("Broker", m->getBroker());
+                            orders_aggregator_->add(tags, "cancelledOrders", static_cast<int64_t>(1), ts_ns);
+                            orders_aggregator_->add(tags, "totalCancelQty", static_cast<int64_t>(m->cancelled_qty), ts_ns);
+                            orders_aggregator_->onIncomingTimestamp(ts_ns);
+                        }
+                        break;
+                    }
+                    case MarketDataType::TRADE: {
+                        const auto* m = castMessage<TradeMsg>(msg.body, msg.body_length);
+                        if (m) {
+                            metrics::TagSet tags;
+                            tags.add("Market", m->getMarket());
+                            tags.add("Instrument", m->getInstrument());
+                            trades_aggregator_->add(tags, "numTrades", static_cast<int64_t>(1), ts_ns);
+                            trades_aggregator_->add(tags, "totalVolume", static_cast<int64_t>(m->quantity), ts_ns);
+                            trades_aggregator_->add(tags, "totalValue", m->price * m->quantity, ts_ns);
+                            trades_aggregator_->set(tags, "highPrice", m->price, ts_ns);
+                            trades_aggregator_->set(tags, "lowPrice", m->price, ts_ns);
+                            trades_aggregator_->onIncomingTimestamp(ts_ns);
+                        }
+                        break;
+                    }
+                    case MarketDataType::QUOTE_BID: {
+                        const auto* m = castMessage<QuoteBidMsg>(msg.body, msg.body_length);
+                        if (m) {
+                            metrics::TagSet tags;
+                            tags.add("Market", m->getMarket());
+                            tags.add("Instrument", m->getInstrument());
+                            quotes_aggregator_->add(tags, "bidUpdates", static_cast<int64_t>(1), ts_ns);
+                            quotes_aggregator_->set(tags, "bestBid", m->price, ts_ns);
+                            quotes_aggregator_->set(tags, "bestBidQty", static_cast<int64_t>(m->quantity), ts_ns);
+                            quotes_aggregator_->onIncomingTimestamp(ts_ns);
+                        }
+                        break;
+                    }
+                    case MarketDataType::QUOTE_ASK: {
+                        const auto* m = castMessage<QuoteAskMsg>(msg.body, msg.body_length);
+                        if (m) {
+                            metrics::TagSet tags;
+                            tags.add("Market", m->getMarket());
+                            tags.add("Instrument", m->getInstrument());
+                            quotes_aggregator_->add(tags, "askUpdates", static_cast<int64_t>(1), ts_ns);
+                            quotes_aggregator_->set(tags, "bestAsk", m->price, ts_ns);
+                            quotes_aggregator_->set(tags, "bestAskQty", static_cast<int64_t>(m->quantity), ts_ns);
+                            quotes_aggregator_->onIncomingTimestamp(ts_ns);
+                        }
+                        break;
+                    }
+                    default:
+                        break;
+                }
+            }
         }
 
         // Invoke handler with connection_id

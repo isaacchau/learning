@@ -1,7 +1,7 @@
 #include "config_parser.h"
 #include "json.hpp"
 #include "log_msg.h"
-#include "aggregation/aggregation_config.h"
+// aggregation config is now part of msg_client.h
 #include <fstream>
 #include <sstream>
 #include <algorithm>
@@ -349,8 +349,12 @@ bool parseConfigFile(const std::string& filepath,
                     error_message = "aggregation.output_format must be a string";
                     return false;
                 }
-                config.aggregation_config.output_format = 
-                    aggregation::parseOutputFormat(agg["output_format"].get<std::string>());
+                std::string fmt = agg["output_format"].get<std::string>();
+                if (fmt == "csv" || fmt == "CSV") {
+                    config.aggregation_config.output_format = metrics::OutputFormat::CSV;
+                } else {
+                    config.aggregation_config.output_format = metrics::OutputFormat::INFLUXDB_LINE;
+                }
             }
             if (agg.contains("output_dir")) {
                 if (!agg["output_dir"].is_string()) {

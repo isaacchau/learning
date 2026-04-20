@@ -14,11 +14,7 @@
 #include "shared_ptr_pool.h"
 #include "protocol.h"
 
-// Aggregation support
-#include "aggregation/aggregation_config.h"
-#include "aggregation/aggregation_manager.h"
-#include "aggregation/output_queue.h"
-#include "aggregation/output_writer.h"
+#include "metrics.hpp"
 
 #include <sys/socket.h>  // For shutdown(), SHUT_RDWR
 #include <unistd.h>      // For close()
@@ -186,39 +182,61 @@ struct ConnectionConfig {
 };
 
 // ============================================================================
+// Aggregation Configuration (simplified for metrics.hpp)
+// ============================================================================
+
+struct AggregationConfig {
+    bool enabled = false;
+    uint64_t window_ms = 1000;
+    metrics::OutputFormat output_format = metrics::OutputFormat::INFLUXDB_LINE;
+    std::string output_dir = "./output";
+    std::string filename_prefix = "marketdata";
+
+    std::string validate() const {
+        if (!enabled) return "";
+        if (window_ms == 0) return "window_ms must be > 0";
+        if (window_ms < 100) return "window_ms must be at least 100ms";
+        if (window_ms > 3600000) return "window_ms must be < 1 hour";
+        if (output_dir.empty()) return "output_dir cannot be empty";
+        if (filename_prefix.empty()) return "filename_prefix cannot be empty";
+        return "";
+    }
+};
+
+// ============================================================================
 // Global Client Configuration
 // ============================================================================
 
 struct MsgClientConfig {
     // Multiple connection configurations
     std::vector<ConnectionConfig> connections;
-    
+
     // Thread configuration (shared across all connections)
     size_t worker_thread_count          = Defaults::WORKER_THREAD_COUNT;
-    
+
     // Queue sizes
     size_t raw_queue_size               = Defaults::RAW_QUEUE_SIZE;
     size_t decoded_queue_size           = Defaults::DECODED_QUEUE_SIZE;
-    
+
     // Timing
     int    reconnect_interval_ms        = Defaults::RECONNECT_INTERVAL_MS;
-    
+
     // Queue push timeout in milliseconds (0 = wait forever, -1 = don't wait)
     int    queue_push_timeout_ms        = Defaults::QUEUE_PUSH_TIMEOUT_MS;
 
     // Memory pool configuration
     std::vector<SizeClassConfig> pool_config; // Empty = use defaults
-    
+
     // Aggregation configuration
-    aggregation::AggregationConfig aggregation_config;
-    
+    AggregationConfig aggregation_config;
+
     // Add a connection (convenience method)
     void addConnection(const ConnectionConfig& conn);
-    void addConnection(const std::string& host, uint16_t port, 
+    void addConnection(const std::string& host, uint16_t port,
                        const std::string& item,
                        const std::string& client_id = Defaults::CLIENT_ID,
                        uint64_t start_seq = Defaults::STARTING_SEQ_NUM);
-    
+
     // Validate entire configuration
     std::string validate() const;
 };
@@ -398,9 +416,10 @@ private:
     int    tcp_rcvbuf_ = 0;
     
     // Aggregation components
-    std::unique_ptr<aggregation::AggregationManager> aggregation_manager_;
-    std::unique_ptr<aggregation::OutputQueue> output_queue_;
-    std::unique_ptr<aggregation::OutputWriter> output_writer_;
+    std::unique_ptr<metrics::DiskWriter> disk_writer_;
+    std::unique_ptr<metrics::Aggregator> orders_aggregator_;
+    std::unique_ptr<metrics::Aggregator> trades_aggregator_;
+    std::unique_ptr<metrics::Aggregator> quotes_aggregator_;
 };
 
 #endif // MSG_CLIENT_H
