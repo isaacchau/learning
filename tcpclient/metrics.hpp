@@ -266,7 +266,7 @@ public:
             dp.bucket_ts = bucket_ts;
             dp.tags = tags;
             dp.addField(field, value);
-            buckets_.emplace(std::move(dp.tags), std::move(dp));
+            buckets_.emplace(tags, std::move(dp));
         }
     }
 
@@ -279,7 +279,7 @@ public:
             dp.bucket_ts = bucket_ts;
             dp.tags = tags;
             dp.setField(field, value);
-            buckets_.emplace(std::move(dp.tags), std::move(dp));
+            buckets_.emplace(tags, std::move(dp));
         }
     }
 
