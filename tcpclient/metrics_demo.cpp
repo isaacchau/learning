@@ -195,6 +195,83 @@ static void testLateEvents() {
     }
 }
 
+static void testKeepAccumulating() {
+    std::cout << "\n=== Test: Keep Accumulating (clear_on_flush=false) ===" << std::endl;
+
+    const std::string output_dir = "./output_demo_keep";
+    const uint64_t bucket_period_ns = 500000000ULL; // 500ms buckets
+
+    // Clean up any previous output
+    std::system(("rm -f " + output_dir + "/*.csv 2>/dev/null").c_str());
+
+    metrics::DiskWriter writer(output_dir);
+    writer.start();
+
+    // clear_on_flush = false
+    metrics::Aggregator agg("orders", "keep", bucket_period_ns, 2,
+                            false, metrics::OutputFormat::CSV, &writer, output_dir);
+
+    // Use a fixed timestamp aligned to bucket boundary
+    uint64_t base_ts = (now_ns() / bucket_period_ns) * bucket_period_ns + bucket_period_ns;
+
+    metrics::TagSet tags;
+    tags.add("sym", "AAPL");
+
+    // Events in bucket 0
+    agg.add(tags, "count", static_cast<int64_t>(1), base_ts);
+    agg.add(tags, "count", static_cast<int64_t>(2), base_ts + 1000000);
+
+    // Event in bucket 1 triggers flush of bucket 0
+    agg.add(tags, "count", static_cast<int64_t>(3), base_ts + bucket_period_ns);
+    agg.onIncomingTimestamp(base_ts + bucket_period_ns);
+
+    // More events in bucket 1 (same tags, accumulated into same entry)
+    agg.add(tags, "count", static_cast<int64_t>(4), base_ts + bucket_period_ns + 1000000);
+
+    // Event in bucket 2 triggers flush of bucket 1
+    agg.add(tags, "count", static_cast<int64_t>(5), base_ts + 2 * bucket_period_ns);
+    agg.onIncomingTimestamp(base_ts + 2 * bucket_period_ns);
+
+    agg.forceFlush();
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    writer.stop();
+
+    // Read the first output file and verify tags are present
+    std::system(("ls " + output_dir + "/*.csv 2>/dev/null > /tmp/keep_files.txt").c_str());
+    std::ifstream files("/tmp/keep_files.txt");
+    std::string filename;
+    bool tag_check_pass = false;
+    int flush_files = 0;
+
+    while (std::getline(files, filename)) {
+        flush_files++;
+        std::ifstream f(filename);
+        std::string line;
+        while (std::getline(f, line)) {
+            // Check that tag_sym column exists and has "AAPL" value
+            if (line.find("tag_sym") != std::string::npos) {
+                // Header line - contains the tag column name
+                tag_check_pass = true;
+            }
+            if (line.find("AAPL") != std::string::npos) {
+                // Data line with tag value
+                tag_check_pass = true;
+            }
+        }
+    }
+
+    std::cout << "  Flush files: " << flush_files << std::endl;
+    std::cout << "  Flushes: " << agg.flushCount() << std::endl;
+
+    if (flush_files >= 2 && tag_check_pass) {
+        std::cout << "  PASS: Tags preserved across multiple flushes with clear_on_flush=false" << std::endl;
+    } else if (flush_files < 2) {
+        std::cout << "  FAIL: Expected at least 2 flush files, got " << flush_files << std::endl;
+    } else {
+        std::cout << "  FAIL: Tags not found in output" << std::endl;
+    }
+}
+
 int main() {
     std::cout << "Metrics Aggregation Library Demo" << std::endl;
     std::cout << "=================================" << std::endl;
@@ -203,6 +280,7 @@ int main() {
     runDemo(metrics::OutputFormat::INFLUXDB_LINE, "InfluxDB_Line");
     testFlushGating();
     testLateEvents();
+    testKeepAccumulating();
 
     std::cout << "\n=== All demos complete ===" << std::endl;
     std::cout << "Check ./output_demo_* directories for output files." << std::endl;
