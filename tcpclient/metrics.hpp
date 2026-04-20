@@ -228,24 +228,26 @@ struct TagSetEq {
 struct Datapoint {
     uint64_t bucket_ts;
     TagSet tags;
-    std::unordered_map<std::string, Value> fields;
+    std::vector<std::pair<std::string, Value>> fields;
 
     void addField(const std::string& name, const Value& value) {
-        auto it = fields.find(name);
-        if (it != fields.end()) {
-            it->second.add(value);
-        } else {
-            fields.emplace(name, value);
+        for (auto& f : fields) {
+            if (f.first == name) {
+                f.second.add(value);
+                return;
+            }
         }
+        fields.emplace_back(name, value);
     }
 
     void setField(const std::string& name, const Value& value) {
-        auto it = fields.find(name);
-        if (it != fields.end()) {
-            it->second.set(value);
-        } else {
-            fields.emplace(name, value);
+        for (auto& f : fields) {
+            if (f.first == name) {
+                f.second.set(value);
+                return;
+            }
         }
+        fields.emplace_back(name, value);
     }
 };
 
@@ -330,7 +332,7 @@ public:
             oss << " ";
             bool first = true;
             // Sort fields for deterministic output
-            std::vector<std::pair<std::string, Value>> sorted_fields(dp.fields.begin(), dp.fields.end());
+            auto sorted_fields = dp.fields;
             std::sort(sorted_fields.begin(), sorted_fields.end(),
                       [](const auto& a, const auto& b) { return a.first < b.first; });
             for (const auto& field : sorted_fields) {
@@ -399,9 +401,11 @@ public:
             }
             for (const auto& k : field_keys) {
                 oss << ",";
-                auto it = dp.fields.find(k);
-                if (it != dp.fields.end()) {
-                    oss << it->second.formatCSV();
+                for (const auto& f : dp.fields) {
+                    if (f.first == k) {
+                        oss << f.second.formatCSV();
+                        break;
+                    }
                 }
             }
             oss << "," << dp.bucket_ts << "\n";
