@@ -257,7 +257,9 @@ int main(int argc, char *argv[]) {
   }
 
   int opt = 1;
-  ::setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+  if (::setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+    LOG_WARN("[Server] Failed to set SO_REUSEADDR: %s", strerror(errno));
+  }
 
   struct sockaddr_in addr;
   std::memset(&addr, 0, sizeof(addr));
@@ -323,13 +325,17 @@ int main(int argc, char *argv[]) {
 
     // Disable Nagle for low latency
     int flag = 1;
-    ::setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+    if (::setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0) {
+      LOG_WARN("[Server] Failed to set TCP_NODELAY: %s", strerror(errno));
+    }
 
     // Increase send buffer to match client's receive buffer (2MB default)
     // This prevents the send buffer from becoming a bottleneck during high-throughput testing
     int sndbuf = getEnvInt("APP_TCP_SERVER_SNDBUF", 2097152);  // 2MB default
     if (sndbuf > 0) {
-      ::setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+      if (::setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) < 0) {
+        LOG_WARN("[Server] Failed to set SO_SNDBUF: %s", strerror(errno));
+      }
     }
 
     char client_ip[INET_ADDRSTRLEN];

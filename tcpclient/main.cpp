@@ -216,8 +216,8 @@ int main(int argc, char *argv[]) {
       config.decoded_queue_size > 0 ? config.decoded_queue_size : Defaults::DECODED_QUEUE_SIZE));
   config.reconnect_interval_ms= getEnvInt("APP_TCP_CLIENT_RECONNECT", 
       config.reconnect_interval_ms > 0 ? config.reconnect_interval_ms : Defaults::RECONNECT_INTERVAL_MS);
-  config.queue_push_timeout_ms= getEnvInt("APP_TCP_CLIENT_QUEUE_TIMEOUT", 
-      config.queue_push_timeout_ms != 0 ? config.queue_push_timeout_ms : Defaults::QUEUE_PUSH_TIMEOUT_MS);
+  config.queue_push_timeout_ms= getEnvInt("APP_TCP_CLIENT_QUEUE_TIMEOUT",
+      config.queue_push_timeout_ms);
 
   int stats_interval_sec = getEnvInt("APP_TCP_CLIENT_STATS_INTERVAL", Defaults::STATS_INTERVAL_SEC);
   int pool_stats_interval_sec = 0;

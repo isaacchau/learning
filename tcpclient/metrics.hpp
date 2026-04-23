@@ -60,9 +60,11 @@ public:
             num_.i += other.num_.i;
         } else if (type_ == INT64 && other.type_ == DOUBLE) {
             type_ = DOUBLE;
-            num_.d = static_cast<double>(num_.i) + other.num_.d;
+            double converted = static_cast<double>(num_.i);
+            num_.d = converted + other.num_.d;
         } else if (type_ == DOUBLE && other.type_ == INT64) {
-            num_.d += static_cast<double>(other.num_.i);
+            double converted = static_cast<double>(other.num_.i);
+            num_.d += converted;
         } else if (type_ == DOUBLE && other.type_ == DOUBLE) {
             num_.d += other.num_.d;
         } else if (type_ == STRING || other.type_ == STRING) {
@@ -423,13 +425,17 @@ public:
         auto tp = std::chrono::system_clock::time_point(
             std::chrono::duration_cast<std::chrono::system_clock::duration>(secs));
         auto time_t_val = std::chrono::system_clock::to_time_t(tp);
-        std::tm* tm = std::localtime(&time_t_val);
+        std::tm tm;
+        if (!localtime_r(&time_t_val, &tm)) {
+            std::cerr << "[Metrics] Warning: localtime_r failed, using epoch for filename" << std::endl;
+            tm = std::tm{};
+        }
 
         std::ostringstream oss;
         oss << output_dir << "/"
             << prefix << "_"
             << measurement << "_"
-            << std::put_time(tm, "%y%m%d_%H%M%S") << "_"
+            << std::put_time(&tm, "%y%m%d_%H%M%S") << "_"
             << sequence << "."
             << ext;
         return oss.str();

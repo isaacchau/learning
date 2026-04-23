@@ -112,11 +112,6 @@ namespace Defaults {
     constexpr int           QUEUE_POP_TIMEOUT_MS = 100;   // Queue pop wait time
     constexpr int           THREAD_JOIN_TIMEOUT_MS = 30000; // Thread join timeout (30s - very generous)
     
-    // Connection health check
-    // Default: 0 (disabled) - accommodates busy/quiet periods during the day.
-    // If enabled, force reconnect if no data for specified milliseconds.
-    constexpr int           CONN_IDLE_TIMEOUT_MS = 0;
-
     // Failover: max retries on same endpoint before switching to next
     constexpr int           MAX_RETRIES_PER_ENDPOINT = 2;
 
@@ -260,6 +255,7 @@ struct ConnectionState {
     SocketGuard socket_guard;                   // Socket handle
     int current_reconnect_delay_ms_;            // Current backoff delay
     std::chrono::steady_clock::time_point last_recv_time_; // Last data received
+    std::chrono::steady_clock::time_point next_retry_time_; // Next allowed reconnect attempt
     std::atomic<uint64_t> last_received_seq_;   // Last sequence number received
     std::atomic<uint64_t> messages_received_;   // Messages received on this connection
     std::atomic<uint64_t> bytes_received_;      // Bytes received on this connection
@@ -270,7 +266,7 @@ struct ConnectionState {
     int consecutive_failures_on_endpoint = 0;   // Failures on current endpoint since last success
     std::vector<ResolvedEndpoint> resolved_endpoints; // One per config endpoint
 
-    ConnectionState(const ConnectionConfig& cfg);
+    explicit ConnectionState(const ConnectionConfig& cfg);
 
     // Current endpoint accessors
     const EndpointConfig& activeEndpoint() const;

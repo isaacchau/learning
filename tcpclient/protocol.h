@@ -45,15 +45,18 @@ struct MsgHdr {
 // Default: 0xCAFEBABE (classic Java magic number, easy to spot in hex dumps).
 // To override: export APP_TCP_MAGIC_KEY="0xDEADBEEF"
 inline uint32_t getMagicKey() {
-    const char* env = std::getenv("APP_TCP_MAGIC_KEY");
-    if (env) {
-        try {
-            return static_cast<uint32_t>(std::stoul(env, nullptr, 0));
-        } catch (...) {
-            // Fall through to default on parse error
+    static const uint32_t key = []() -> uint32_t {
+        const char* env = std::getenv("APP_TCP_MAGIC_KEY");
+        if (env) {
+            try {
+                return static_cast<uint32_t>(std::stoul(env, nullptr, 0));
+            } catch (...) {
+                // Fall through to default on parse error
+            }
         }
-    }
-    return 0xCAFEBABE;
+        return 0xCAFEBABE;
+    }();
+    return key;
 }
 
 static const size_t MIN_MSG_LEN = sizeof(TcpResponse) + sizeof(MsgHdr); // 24
@@ -63,16 +66,19 @@ static const size_t MAX_MSG_LEN = 65535;
 // Default: 65536 (64KB). Must be >= MAX_MSG_LEN.
 // This is the user-space buffer for recv(), NOT the TCP socket buffer.
 inline size_t getRecvBufferSize() {
-    const char* env = std::getenv("APP_TCP_RECV_BUFFER_SIZE");
-    if (env) {
-        try {
-            size_t size = static_cast<size_t>(std::stoul(env));
-            if (size >= MAX_MSG_LEN) return size;
-        } catch (...) {
-            // Fall through to default on error
+    static const size_t size = []() -> size_t {
+        const char* env = std::getenv("APP_TCP_RECV_BUFFER_SIZE");
+        if (env) {
+            try {
+                size_t s = static_cast<size_t>(std::stoul(env));
+                if (s >= MAX_MSG_LEN) return s;
+            } catch (...) {
+                // Fall through to default on error
+            }
         }
-    }
-    return 65536; // 64KB default (good for batching multiple small messages)
+        return 65536; // 64KB default (good for batching multiple small messages)
+    }();
+    return size;
 }
 
 // ============================================================================

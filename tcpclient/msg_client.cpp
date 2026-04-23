@@ -157,6 +157,7 @@ ConnectionState::ConnectionState(const ConnectionConfig& cfg)
     : config(cfg)
     , current_reconnect_delay_ms_(Defaults::RECONNECT_INTERVAL_MS)
     , last_recv_time_(std::chrono::steady_clock::now())
+    , next_retry_time_(std::chrono::steady_clock::time_point())
     , last_received_seq_(cfg.starting_seq_num)
     , messages_received_(0)
     , bytes_received_(0)
@@ -327,16 +328,8 @@ void MsgClient::stop() {
         ::close(epoll_fd_local);
     }
 
-    // Flush aggregators and stop disk writer first (before workers finish)
-    if (orders_aggregator_) orders_aggregator_->forceFlush();
-    if (trades_aggregator_) trades_aggregator_->forceFlush();
-    if (quotes_aggregator_) quotes_aggregator_->forceFlush();
-    if (disk_writer_) {
-        disk_writer_->stop();
-    }
-
-    // Join all threads gracefully.  All blocking syscalls now have timeouts
-    // (SO_SNDTIMEO on connect, epoll_wait timeout, queue pop timeouts).
+    // Join threads in pipeline order (producers → consumers) so workers
+    // finish processing everything already in the queues.
     if (io_thread_.joinable()) {
         io_thread_.join();
     }
@@ -349,6 +342,15 @@ void MsgClient::stop() {
         }
     }
     worker_threads_.clear();
+
+    // Flush aggregators AFTER workers finish (no new data can arrive).
+    // Stop disk writer only after all data is enqueued.
+    if (orders_aggregator_) orders_aggregator_->forceFlush();
+    if (trades_aggregator_) trades_aggregator_->forceFlush();
+    if (quotes_aggregator_) quotes_aggregator_->forceFlush();
+    if (disk_writer_) {
+        disk_writer_->stop();
+    }
 }
 
 StatsSnapshot MsgClient::getStats() const {
@@ -472,9 +474,15 @@ bool MsgClient::connectToServer(size_t conn_idx) {
     int keepalive = 1;
     if (::setsockopt(conn.socket_guard.get(), SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive)) == 0) {
 #ifdef __linux__
-        ::setsockopt(conn.socket_guard.get(), IPPROTO_TCP, TCP_KEEPIDLE, &tcp_keepidle_, sizeof(tcp_keepidle_));
-        ::setsockopt(conn.socket_guard.get(), IPPROTO_TCP, TCP_KEEPINTVL, &tcp_keepintvl_, sizeof(tcp_keepintvl_));
-        ::setsockopt(conn.socket_guard.get(), IPPROTO_TCP, TCP_KEEPCNT, &tcp_keepcnt_, sizeof(tcp_keepcnt_));
+        if (::setsockopt(conn.socket_guard.get(), IPPROTO_TCP, TCP_KEEPIDLE, &tcp_keepidle_, sizeof(tcp_keepidle_)) < 0) {
+            LOG_WARN("[MsgClient][Conn %zu] Failed to set TCP_KEEPIDLE: %s", conn_idx, strerror(errno));
+        }
+        if (::setsockopt(conn.socket_guard.get(), IPPROTO_TCP, TCP_KEEPINTVL, &tcp_keepintvl_, sizeof(tcp_keepintvl_)) < 0) {
+            LOG_WARN("[MsgClient][Conn %zu] Failed to set TCP_KEEPINTVL: %s", conn_idx, strerror(errno));
+        }
+        if (::setsockopt(conn.socket_guard.get(), IPPROTO_TCP, TCP_KEEPCNT, &tcp_keepcnt_, sizeof(tcp_keepcnt_)) < 0) {
+            LOG_WARN("[MsgClient][Conn %zu] Failed to set TCP_KEEPCNT: %s", conn_idx, strerror(errno));
+        }
 
         LOG_INFO("[MsgClient][Conn %zu] TCP Keepalive configured: idle=%ds, intvl=%ds, probes=%d",
                  conn_idx, tcp_keepidle_, tcp_keepintvl_, tcp_keepcnt_);
@@ -490,18 +498,24 @@ bool MsgClient::connectToServer(size_t conn_idx) {
     struct timeval tv;
     tv.tv_sec  = 5;
     tv.tv_usec = 0;
-    ::setsockopt(conn.socket_guard.get(), SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    if (::setsockopt(conn.socket_guard.get(), SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0) {
+        LOG_WARN("[MsgClient][Conn %zu] Failed to set SO_SNDTIMEO: %s", conn_idx, strerror(errno));
+    }
 
     // Disable Nagle's algorithm for low latency
     int flag = 1;
-    ::setsockopt(conn.socket_guard.get(), IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+    if (::setsockopt(conn.socket_guard.get(), IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0) {
+        LOG_WARN("[MsgClient][Conn %zu] Failed to set TCP_NODELAY: %s", conn_idx, strerror(errno));
+    }
 
     // Set TCP receive buffer size
     if (tcp_rcvbuf_ > 0) {
         socklen_t optlen = sizeof(tcp_rcvbuf_);
         int old_size = 0;
         ::getsockopt(conn.socket_guard.get(), SOL_SOCKET, SO_RCVBUF, &old_size, &optlen);
-        ::setsockopt(conn.socket_guard.get(), SOL_SOCKET, SO_RCVBUF, &tcp_rcvbuf_, sizeof(tcp_rcvbuf_));
+        if (::setsockopt(conn.socket_guard.get(), SOL_SOCKET, SO_RCVBUF, &tcp_rcvbuf_, sizeof(tcp_rcvbuf_)) < 0) {
+            LOG_WARN("[MsgClient][Conn %zu] Failed to set SO_RCVBUF: %s", conn_idx, strerror(errno));
+        }
         int actual_rcvbuf = tcp_rcvbuf_;
         ::getsockopt(conn.socket_guard.get(), SOL_SOCKET, SO_RCVBUF, &actual_rcvbuf, &optlen);
         LOG_INFO("[MsgClient][Conn %zu] TCP receive buffer: %d KB (requested: %d KB, system default: %d KB)",
@@ -619,14 +633,15 @@ void MsgClient::handleConnectFailure(size_t conn_idx, const char* reason) {
             Defaults::RECONNECT_MAX_MS);
     }
 
+    conn.next_retry_time_ = std::chrono::steady_clock::now()
+                          + std::chrono::milliseconds(conn.current_reconnect_delay_ms_);
+
     LOG_INFO("[MsgClient][Conn %zu] %s on %s:%u (failure %d/%d), retrying in %d ms...",
              conn_idx, reason,
              conn.activeEndpoint().host.c_str(), conn.activeEndpoint().port,
              conn.consecutive_failures_on_endpoint,
              conn.config.max_retries_per_endpoint,
              conn.current_reconnect_delay_ms_);
-    std::this_thread::sleep_for(
-        std::chrono::milliseconds(conn.current_reconnect_delay_ms_));
 }
 
 // ============================================================================
@@ -647,20 +662,27 @@ void MsgClient::ioLoop() {
     // Initialize all connections as needing to connect
     for (size_t i = 0; i < connections_.size(); ++i) {
         connections_[i]->current_reconnect_delay_ms_ = config_.reconnect_interval_ms;
+        connections_[i]->next_retry_time_ = std::chrono::steady_clock::time_point();
     }
 
     while (running_.load()) {
-        // Try to connect any disconnected connections
+        auto now = std::chrono::steady_clock::now();
+
+        // Try to connect any disconnected connections that are due for retry
         for (size_t i = 0; i < connections_.size(); ++i) {
             if (!connected[i] && running_.load()) {
                 ConnectionState& conn = *connections_[i];
+
+                if (now < conn.next_retry_time_) {
+                    continue;  // Not yet time to retry
+                }
 
                 if (!connectToServer(i)) {
                     handleConnectFailure(i, "Connection failed");
                     continue;
                 }
 
-                conn.last_recv_time_ = std::chrono::steady_clock::now();
+                conn.last_recv_time_ = now;
 
                 if (!sendSubscription(i)) {
                     closeConnection(i);
@@ -686,24 +708,23 @@ void MsgClient::ioLoop() {
             }
         }
 
-        // Check if we have any connected sockets
-        bool has_connected = false;
+        // Compute epoll timeout: wake up when the next disconnected connection
+        // is due for retry, but don't exceed POLL_TIMEOUT_MS.
+        auto next_event = now + std::chrono::milliseconds(Defaults::POLL_TIMEOUT_MS);
         for (size_t i = 0; i < connections_.size(); ++i) {
-            if (connected[i] && connections_[i]->socket_guard.valid()) {
-                has_connected = true;
-                break;
+            if (!connected[i]) {
+                if (connections_[i]->next_retry_time_ < next_event) {
+                    next_event = connections_[i]->next_retry_time_;
+                }
             }
         }
-
-        if (!has_connected) {
-            // No connected sockets, wait a bit before retrying
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            continue;
-        }
+        int epoll_timeout_ms = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(next_event - now).count());
+        if (epoll_timeout_ms < 0) epoll_timeout_ms = 0;
 
         // Wait for events using epoll
         struct epoll_event events[Defaults::MAX_CONNECTIONS];
-        int ret = ::epoll_wait(epoll_fd_.load(), events, Defaults::MAX_CONNECTIONS, Defaults::POLL_TIMEOUT_MS);
+        int ret = ::epoll_wait(epoll_fd_.load(), events, Defaults::MAX_CONNECTIONS, epoll_timeout_ms);
         
         if (ret < 0) {
             if (errno == EINTR) continue;
@@ -847,23 +868,10 @@ void MsgClient::ioLoop() {
             }
         }
         
-        // Check idle timeout for all connected connections
-        // (epoll_wait timeout means no data on any socket)
-        if (Defaults::CONN_IDLE_TIMEOUT_MS > 0) {
-            auto now = std::chrono::steady_clock::now();
-            for (size_t i = 0; i < connections_.size(); ++i) {
-                if (connected[i]) {
-                    auto idle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        now - connections_[i]->last_recv_time_).count();
-                    if (idle_ms > Defaults::CONN_IDLE_TIMEOUT_MS) {
-                        LOG_ERR("[MsgClient][Conn %zu] Connection idle for %ld ms (timeout: %d ms), forcing reconnect",
-                                i, idle_ms, Defaults::CONN_IDLE_TIMEOUT_MS);
-                        connected[i] = false;
-                        closeConnection(i);
-                    }
-                }
-            }
-        }
+        // Note: Intentionally no idle-timeout disconnect here.
+        // Market data can legitimately be quiet for extended periods
+        // (overnight, holidays, pre-open). Forcing a reconnect would
+        // be counter-productive — TCP keepalive handles dead peers.
     }
 }
 
