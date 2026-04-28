@@ -1,0 +1,5 @@
+# Build artifacts
+*.o
+a.out
+data_dumper_demo
+data_dumper_upstream_demo
