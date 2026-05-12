@@ -385,7 +385,6 @@ int main(int argc, char *argv[]) {
                         : std::chrono::nanoseconds(0);
 
     auto batch_start = std::chrono::steady_clock::now();
-    uint64_t stats_last_seq = seq;
 
     while (!g_shutdown.load(std::memory_order_relaxed)) {
       // Check if rate was changed via keyboard

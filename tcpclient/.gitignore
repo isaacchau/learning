@@ -15,6 +15,7 @@ scan-results/
 
 # Static analysis outputs
 cppcheck_output.txt
+output_*/*
 
 # Log files
 log/*
