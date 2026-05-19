@@ -369,25 +369,31 @@ StatsSnapshot MsgClient::getStats() const {
     // Per-connection stats
     snap.connection_stats.reserve(connections_.size());
     for (size_t i = 0; i < connections_.size(); ++i) {
-        ConnectionStats cs;
-        cs.connection_id = i;
-        cs.messages_received = connections_[i]->messages_received_.load(std::memory_order_relaxed);
-        cs.bytes_received = connections_[i]->bytes_received_.load(std::memory_order_relaxed);
-        cs.reconnect_count = connections_[i]->reconnect_count_.load(std::memory_order_relaxed);
-        cs.last_seq_num = connections_[i]->last_received_seq_.load(std::memory_order_relaxed);
-        cs.connected = connections_[i]->socket_guard.valid();
-        const auto& conn = *connections_[i];
-        if (conn.active_endpoint_idx < conn.config.endpoints.size()) {
-            const auto& ep = conn.activeEndpoint();
-            cs.endpoint = ep.host + ":" + std::to_string(ep.port);
-        } else {
-            cs.endpoint = "unknown";
-        }
-        cs.item_name = connections_[i]->config.item_name;
-        snap.connection_stats.push_back(cs);
+        snap.connection_stats.push_back(buildConnectionStats(i));
     }
-    
+
     return snap;
+}
+
+ConnectionStats MsgClient::buildConnectionStats(size_t conn_idx) const {
+    ConnectionStats cs;
+    cs.connection_id     = conn_idx;
+    cs.messages_received = connections_[conn_idx]->messages_received_.load(std::memory_order_relaxed);
+    cs.bytes_received    = connections_[conn_idx]->bytes_received_.load(std::memory_order_relaxed);
+    cs.reconnect_count   = connections_[conn_idx]->reconnect_count_.load(std::memory_order_relaxed);
+    cs.last_seq_num      = connections_[conn_idx]->last_received_seq_.load(std::memory_order_relaxed);
+    cs.connected         = connections_[conn_idx]->socket_guard.valid();
+    cs.item_name         = connections_[conn_idx]->config.item_name;
+
+    const auto& conn = *connections_[conn_idx];
+    if (conn.active_endpoint_idx < conn.config.endpoints.size()) {
+        const auto& ep = conn.activeEndpoint();
+        cs.endpoint = ep.host + ":" + std::to_string(ep.port);
+    } else {
+        cs.endpoint = "unknown";
+    }
+
+    return cs;
 }
 
 std::vector<MemoryPool::Stats> MsgClient::getPoolStats() const {
@@ -447,6 +453,87 @@ bool MsgClient::resolveHost(size_t conn_idx) {
     return any_ok;
 }
 
+// ============================================================================
+// Socket Setup Helpers
+// ============================================================================
+// These helpers configure a newly-created socket before connect().
+// Extracted from connectToServer() to reduce its length and nesting.
+// ============================================================================
+
+static void applyKeepalive(int fd, size_t conn_idx, int tcp_keepidle, int tcp_keepintvl, int tcp_keepcnt) {
+    int keepalive = 1;
+    if (::setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive)) != 0) {
+        LOG_WARN("[MsgClient][Conn %zu] Failed to enable SO_KEEPALIVE: %s", conn_idx, strerror(errno));
+        return;
+    }
+
+#ifdef __linux__
+    if (::setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &tcp_keepidle, sizeof(tcp_keepidle)) < 0) {
+        LOG_WARN("[MsgClient][Conn %zu] Failed to set TCP_KEEPIDLE: %s", conn_idx, strerror(errno));
+    }
+    if (::setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &tcp_keepintvl, sizeof(tcp_keepintvl)) < 0) {
+        LOG_WARN("[MsgClient][Conn %zu] Failed to set TCP_KEEPINTVL: %s", conn_idx, strerror(errno));
+    }
+    if (::setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &tcp_keepcnt, sizeof(tcp_keepcnt)) < 0) {
+        LOG_WARN("[MsgClient][Conn %zu] Failed to set TCP_KEEPCNT: %s", conn_idx, strerror(errno));
+    }
+    LOG_INFO("[MsgClient][Conn %zu] TCP Keepalive configured: idle=%ds, intvl=%ds, probes=%d",
+             conn_idx, tcp_keepidle, tcp_keepintvl, tcp_keepcnt);
+#else
+    (void)tcp_keepidle; (void)tcp_keepintvl; (void)tcp_keepcnt;
+    LOG_INFO("[MsgClient][Conn %zu] TCP Keepalive enabled (OS defaults)", conn_idx);
+#endif
+}
+
+static void applyConnectTimeout(int fd, size_t conn_idx) {
+    struct timeval tv;
+    tv.tv_sec  = 5;
+    tv.tv_usec = 0;
+    if (::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0) {
+        LOG_WARN("[MsgClient][Conn %zu] Failed to set SO_SNDTIMEO: %s", conn_idx, strerror(errno));
+    }
+}
+
+static void applyTcpNoDelay(int fd, size_t conn_idx) {
+    int flag = 1;
+    if (::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0) {
+        LOG_WARN("[MsgClient][Conn %zu] Failed to set TCP_NODELAY: %s", conn_idx, strerror(errno));
+    }
+}
+
+static void applyRecvBufferSize(int fd, size_t conn_idx, int requested_size) {
+    if (requested_size <= 0) return;
+
+    socklen_t optlen = sizeof(requested_size);
+    int old_size = 0;
+    ::getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &old_size, &optlen);
+
+    if (::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &requested_size, sizeof(requested_size)) < 0) {
+        LOG_WARN("[MsgClient][Conn %zu] Failed to set SO_RCVBUF: %s", conn_idx, strerror(errno));
+    }
+
+    int actual_size = requested_size;
+    ::getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &actual_size, &optlen);
+    LOG_INFO("[MsgClient][Conn %zu] TCP receive buffer: %d KB (requested: %d KB, system default: %d KB)",
+             conn_idx, actual_size / 1024, requested_size / 1024, old_size / 1024);
+}
+
+static bool addSocketToEpoll(int epoll_fd, int sock_fd, size_t conn_idx) {
+    if (epoll_fd < 0) return true;  // epoll not available, skip
+
+    struct epoll_event ev;
+    std::memset(&ev, 0, sizeof(ev));
+    ev.events = EPOLLIN | EPOLLPRI | EPOLLERR | EPOLLHUP | EPOLLRDHUP;
+    ev.data.u32 = static_cast<uint32_t>(conn_idx);
+
+    if (::epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sock_fd, &ev) < 0) {
+        LOG_ERR("[MsgClient][Conn %zu] Failed to add socket to epoll: %s", conn_idx, strerror(errno));
+        return false;
+    }
+    LOG_DEBUG("[MsgClient][Conn %zu] Socket added to epoll", conn_idx);
+    return true;
+}
+
 bool MsgClient::connectToServer(size_t conn_idx) {
     if (conn_idx >= connections_.size()) return false;
 
@@ -473,59 +560,11 @@ bool MsgClient::connectToServer(size_t conn_idx) {
     }
     conn.socket_guard.reset(fd);
 
-    // Enable TCP Keepalive
-    int keepalive = 1;
-    if (::setsockopt(conn.socket_guard.get(), SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive)) == 0) {
-#ifdef __linux__
-        if (::setsockopt(conn.socket_guard.get(), IPPROTO_TCP, TCP_KEEPIDLE, &tcp_keepidle_, sizeof(tcp_keepidle_)) < 0) {
-            LOG_WARN("[MsgClient][Conn %zu] Failed to set TCP_KEEPIDLE: %s", conn_idx, strerror(errno));
-        }
-        if (::setsockopt(conn.socket_guard.get(), IPPROTO_TCP, TCP_KEEPINTVL, &tcp_keepintvl_, sizeof(tcp_keepintvl_)) < 0) {
-            LOG_WARN("[MsgClient][Conn %zu] Failed to set TCP_KEEPINTVL: %s", conn_idx, strerror(errno));
-        }
-        if (::setsockopt(conn.socket_guard.get(), IPPROTO_TCP, TCP_KEEPCNT, &tcp_keepcnt_, sizeof(tcp_keepcnt_)) < 0) {
-            LOG_WARN("[MsgClient][Conn %zu] Failed to set TCP_KEEPCNT: %s", conn_idx, strerror(errno));
-        }
-
-        LOG_INFO("[MsgClient][Conn %zu] TCP Keepalive configured: idle=%ds, intvl=%ds, probes=%d",
-                 conn_idx, tcp_keepidle_, tcp_keepintvl_, tcp_keepcnt_);
-#else
-        LOG_INFO("[MsgClient][Conn %zu] TCP Keepalive enabled (OS defaults)", conn_idx);
-#endif
-    } else {
-        LOG_WARN("[MsgClient][Conn %zu] Failed to enable SO_KEEPALIVE: %s",
-                 conn_idx, strerror(errno));
-    }
-
-    // Set connect timeout via SO_SNDTIMEO (5 seconds)
-    // Prevents connect() from hanging indefinitely on unreachable hosts.
-    struct timeval tv;
-    tv.tv_sec  = 5;
-    tv.tv_usec = 0;
-    if (::setsockopt(conn.socket_guard.get(), SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0) {
-        LOG_WARN("[MsgClient][Conn %zu] Failed to set SO_SNDTIMEO: %s", conn_idx, strerror(errno));
-    }
-
-    // Disable Nagle's algorithm for low latency
-    // Nagle batches small sends, which hurts our tiny subscription request.
-    int flag = 1;
-    if (::setsockopt(conn.socket_guard.get(), IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0) {
-        LOG_WARN("[MsgClient][Conn %zu] Failed to set TCP_NODELAY: %s", conn_idx, strerror(errno));
-    }
-
-    // Set TCP receive buffer size
-    if (tcp_rcvbuf_ > 0) {
-        socklen_t optlen = sizeof(tcp_rcvbuf_);
-        int old_size = 0;
-        ::getsockopt(conn.socket_guard.get(), SOL_SOCKET, SO_RCVBUF, &old_size, &optlen);
-        if (::setsockopt(conn.socket_guard.get(), SOL_SOCKET, SO_RCVBUF, &tcp_rcvbuf_, sizeof(tcp_rcvbuf_)) < 0) {
-            LOG_WARN("[MsgClient][Conn %zu] Failed to set SO_RCVBUF: %s", conn_idx, strerror(errno));
-        }
-        int actual_rcvbuf = tcp_rcvbuf_;
-        ::getsockopt(conn.socket_guard.get(), SOL_SOCKET, SO_RCVBUF, &actual_rcvbuf, &optlen);
-        LOG_INFO("[MsgClient][Conn %zu] TCP receive buffer: %d KB (requested: %d KB, system default: %d KB)",
-                 conn_idx, actual_rcvbuf / 1024, tcp_rcvbuf_ / 1024, old_size / 1024);
-    }
+    // Apply socket options
+    applyKeepalive(fd, conn_idx, tcp_keepidle_, tcp_keepintvl_, tcp_keepcnt_);
+    applyConnectTimeout(fd, conn_idx);
+    applyTcpNoDelay(fd, conn_idx);
+    applyRecvBufferSize(fd, conn_idx, tcp_rcvbuf_);
 
     // Connect using pre-resolved address of the active endpoint
     const auto& resolved = conn.activeResolved();
@@ -547,19 +586,9 @@ bool MsgClient::connectToServer(size_t conn_idx) {
              conn.config.endpoints.size());
 
     // Add socket to epoll for efficient I/O multiplexing
-    int epoll_fd_local = epoll_fd_.load();
-    if (epoll_fd_local >= 0) {
-        struct epoll_event ev;
-        std::memset(&ev, 0, sizeof(ev));
-        ev.events = EPOLLIN | EPOLLPRI | EPOLLERR | EPOLLHUP | EPOLLRDHUP;
-        ev.data.u32 = static_cast<uint32_t>(conn_idx);  // Store connection index
-        if (::epoll_ctl(epoll_fd_local, EPOLL_CTL_ADD, conn.socket_guard.get(), &ev) < 0) {
-            LOG_ERR("[MsgClient][Conn %zu] Failed to add socket to epoll: %s",
-                    conn_idx, strerror(errno));
-            conn.socket_guard.close();
-            return false;
-        }
-        LOG_DEBUG("[MsgClient][Conn %zu] Socket added to epoll", conn_idx);
+    if (!addSocketToEpoll(epoll_fd_.load(), conn.socket_guard.get(), conn_idx)) {
+        conn.socket_guard.close();
+        return false;
     }
 
     return true;

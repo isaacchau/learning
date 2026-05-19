@@ -115,38 +115,53 @@ private:
 // ============================================================================
 
 // Default configuration values
+// ------------------------------------------------------------------------
+// Grouped by functional area for easier navigation.
+// ------------------------------------------------------------------------
 namespace Defaults {
+
+    // --- Network Defaults ---
     constexpr const char*   HOST                 = "127.0.0.1";
     constexpr uint16_t      PORT                 = 8888;
+    constexpr uint16_t      MIN_PORT             = 1;
+    constexpr uint16_t      MAX_PORT             = 65535;
+
+    // --- Subscription Defaults ---
     constexpr const char*   ITEM_NAME            = "default";
     constexpr const char*   CLIENT_ID            = "MsgClient";
     constexpr uint64_t      STARTING_SEQ_NUM     = 0;
-    
+    constexpr size_t        MAX_ITEM_NAME_LEN    = 32;
+    constexpr size_t        MAX_CLIENT_ID_LEN    = 32;
+
+    // --- Threading Defaults ---
     constexpr size_t        IO_THREAD_COUNT      = 1;     // Fixed: single IO thread
     constexpr size_t        DECODER_THREAD_COUNT = 1;     // Fixed: single decoder thread
     constexpr size_t        WORKER_THREAD_COUNT  = 2;     // Configurable: 1-64
     constexpr size_t        MIN_WORKER_THREADS   = 1;
     constexpr size_t        MAX_WORKER_THREADS   = 64;
     constexpr size_t        MAX_CONNECTIONS      = 64;    // Maximum number of connections
-    
+
+    // --- Queue Defaults ---
     constexpr size_t        RAW_QUEUE_SIZE       = 16384; // SPSC queue: IO → decoder
     constexpr size_t        DECODED_QUEUE_SIZE   = 16384; // Per-worker SPSC queue
-    
+    constexpr size_t        MIN_QUEUE_SIZE       = 64;
+    constexpr size_t        MAX_QUEUE_SIZE       = 1048576;  // 1M entries
+
+    // --- Reconnection Defaults ---
     constexpr int           RECONNECT_INTERVAL_MS= 3000;
     constexpr int           RECONNECT_MIN_MS     = 1000;  // Exponential backoff min
     constexpr int           RECONNECT_MAX_MS     = 60000; // Exponential backoff max (1 min)
+    constexpr int           MIN_RECONNECT_MS     = 100;
+    constexpr int           MAX_RECONNECT_MS     = 300000;  // 5 minutes
     constexpr double        RECONNECT_BACKOFF_MULT = 2.0; // Backoff multiplier
-    constexpr int           STATS_INTERVAL_SEC   = 5;
-    
-    // Timeouts
-    constexpr int           POLL_TIMEOUT_MS      = 100;   // poll() wait time
-    constexpr int           QUEUE_POP_TIMEOUT_MS = 100;   // Queue pop wait time
-    constexpr int           THREAD_JOIN_TIMEOUT_MS = 30000; // Thread join timeout (30s - very generous)
-    
-    // Failover: max retries on same endpoint before switching to next
     constexpr int           MAX_RETRIES_PER_ENDPOINT = 2;
 
-    // Push wait timeout for queues (when full)
+    // --- Timeout Defaults ---
+    constexpr int           POLL_TIMEOUT_MS      = 100;   // poll() wait time
+    constexpr int           QUEUE_POP_TIMEOUT_MS = 100;   // Queue pop wait time
+    constexpr int           THREAD_JOIN_TIMEOUT_MS = 30000; // Thread join timeout (30s)
+
+    // --- Queue Push Timeout ---
     // NOTE: This uses a "drop" strategy rather than backpressure.
     //
     // Why drop instead of backpressure?
@@ -166,20 +181,9 @@ namespace Defaults {
     constexpr int           QUEUE_PUSH_TIMEOUT_MS = 5;
     constexpr int           MIN_QUEUE_PUSH_TIMEOUT_MS = -1;  // -1 = no wait
     constexpr int           MAX_QUEUE_PUSH_TIMEOUT_MS = 60000; // 60 seconds max
-    
-    // Queue size limits
-    constexpr size_t        MIN_QUEUE_SIZE       = 64;
-    constexpr size_t        MAX_QUEUE_SIZE       = 1048576;  // 1M entries
-    
-    // Network limits
-    constexpr uint16_t      MIN_PORT             = 1;
-    constexpr uint16_t      MAX_PORT             = 65535;
-    constexpr int           MIN_RECONNECT_MS     = 100;
-    constexpr int           MAX_RECONNECT_MS     = 300000;  // 5 minutes
-    
-    // Protocol limits (from protocol.h)
-    constexpr size_t        MAX_ITEM_NAME_LEN    = 32;
-    constexpr size_t        MAX_CLIENT_ID_LEN    = 32;
+
+    // --- Stats Defaults ---
+    constexpr int           STATS_INTERVAL_SEC   = 5;
 }
 
 // ============================================================================
@@ -431,6 +435,9 @@ private:
     bool sendSubscription(size_t conn_idx);
     void closeConnection(size_t conn_idx);
     void closeAllSockets();
+
+    // Statistics helper
+    ConnectionStats buildConnectionStats(size_t conn_idx) const;
 
     // Failover
     void advanceToNextEndpoint(size_t conn_idx);

@@ -50,111 +50,114 @@ namespace {
         return true;
     }
     
-    bool validateConfig(const MsgClientConfig& config, std::string& error) {
-        // Validate global settings
+    // ------------------------------------------------------------------------
+    // Global config validation
+    // ------------------------------------------------------------------------
+    bool validateGlobalSettings(const MsgClientConfig& config, std::string& error) {
         if (!validateRange("workers", config.worker_thread_count,
-                          Defaults::MIN_WORKER_THREADS, Defaults::MAX_WORKER_THREADS, error)) {
+                           Defaults::MIN_WORKER_THREADS, Defaults::MAX_WORKER_THREADS, error)) {
             return false;
         }
-        
         if (!validateRange("raw_queue_size", config.raw_queue_size,
-                          Defaults::MIN_QUEUE_SIZE, Defaults::MAX_QUEUE_SIZE, error)) {
+                           Defaults::MIN_QUEUE_SIZE, Defaults::MAX_QUEUE_SIZE, error)) {
             return false;
         }
-        
         if (!validateRange("decoded_queue_size", config.decoded_queue_size,
-                          Defaults::MIN_QUEUE_SIZE, Defaults::MAX_QUEUE_SIZE, error)) {
+                           Defaults::MIN_QUEUE_SIZE, Defaults::MAX_QUEUE_SIZE, error)) {
             return false;
         }
-        
         if (!validateRangeInt("reconnect_interval_ms", config.reconnect_interval_ms,
-                             Defaults::MIN_RECONNECT_MS, Defaults::MAX_RECONNECT_MS, error)) {
+                              Defaults::MIN_RECONNECT_MS, Defaults::MAX_RECONNECT_MS, error)) {
             return false;
         }
-        
         if (!validateRangeInt("queue_push_timeout_ms", config.queue_push_timeout_ms,
-                             Defaults::MIN_QUEUE_PUSH_TIMEOUT_MS, Defaults::MAX_QUEUE_PUSH_TIMEOUT_MS, error)) {
+                              Defaults::MIN_QUEUE_PUSH_TIMEOUT_MS, Defaults::MAX_QUEUE_PUSH_TIMEOUT_MS, error)) {
             return false;
         }
-        
-        // Validate connection count
+        return true;
+    }
+
+    // ------------------------------------------------------------------------
+    // Connection-level validation
+    // ------------------------------------------------------------------------
+    bool validateConnection(const ConnectionConfig& conn, size_t conn_idx, std::string& error) {
+        std::string prefix = "connections[" + std::to_string(conn_idx) + "]";
+
+        if (conn.endpoints.empty()) {
+            error = prefix + ": at least one endpoint required";
+            return false;
+        }
+
+        for (size_t j = 0; j < conn.endpoints.size(); ++j) {
+            const auto& ep = conn.endpoints[j];
+            std::string ep_prefix = prefix + ".endpoints[" + std::to_string(j) + "]";
+            if (!validateNotEmpty(ep_prefix + ".host", ep.host, error)) return false;
+            if (!validateRangeInt(ep_prefix + ".port", ep.port,
+                                  Defaults::MIN_PORT, Defaults::MAX_PORT, error)) return false;
+        }
+
+        if (!validateNotEmpty(prefix + ".item_name", conn.item_name, error)) return false;
+        if (!validateMaxLength(prefix + ".item_name", conn.item_name,
+                               Defaults::MAX_ITEM_NAME_LEN, error)) return false;
+        if (!validateNotEmpty(prefix + ".client_id", conn.client_id, error)) return false;
+        if (!validateMaxLength(prefix + ".client_id", conn.client_id,
+                               Defaults::MAX_CLIENT_ID_LEN, error)) return false;
+
+        return true;
+    }
+
+    // ------------------------------------------------------------------------
+    // Memory pool config validation
+    // ------------------------------------------------------------------------
+    bool validatePoolConfig(const MsgClientConfig& config, std::string& error) {
+        if (config.pool_config.empty()) return true;
+
+        if (config.pool_config.size() != MemoryPool::NUM_SIZE_CLASSES) {
+            error = "Memory pool must have exactly " +
+                    std::to_string(MemoryPool::NUM_SIZE_CLASSES) + " size classes";
+            return false;
+        }
+
+        for (size_t i = 0; i < config.pool_config.size(); ++i) {
+            const auto& cls = config.pool_config[i];
+            std::string prefix = "memory_pool.class_" + std::to_string(i);
+
+            if (cls.initial_count > cls.max_total_allocated) {
+                error = prefix + ".initial (" + std::to_string(cls.initial_count) +
+                        ") cannot exceed max_total (" + std::to_string(cls.max_total_allocated) + ")";
+                return false;
+            }
+            if (cls.max_count > cls.max_total_allocated) {
+                error = prefix + ".max_free (" + std::to_string(cls.max_count) +
+                        ") cannot exceed max_total (" + std::to_string(cls.max_total_allocated) + ")";
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // ------------------------------------------------------------------------
+    // Top-level config validation
+    // ------------------------------------------------------------------------
+    bool validateConfig(const MsgClientConfig& config, std::string& error) {
+        if (!validateGlobalSettings(config, error)) return false;
+
         if (config.connections.empty()) {
             error = "At least one connection must be configured";
             return false;
         }
-        
         if (config.connections.size() > Defaults::MAX_CONNECTIONS) {
-            error = "Too many connections (max " + std::to_string(Defaults::MAX_CONNECTIONS) + 
+            error = "Too many connections (max " + std::to_string(Defaults::MAX_CONNECTIONS) +
                     ", got " + std::to_string(config.connections.size()) + ")";
             return false;
         }
-        
-        // Validate each connection
+
         for (size_t i = 0; i < config.connections.size(); ++i) {
-            const auto& conn = config.connections[i];
-            std::string prefix = "connections[" + std::to_string(i) + "]";
-            
-            if (conn.endpoints.empty()) {
-                error = prefix + ": at least one endpoint required";
-                return false;
-            }
-            for (size_t j = 0; j < conn.endpoints.size(); ++j) {
-                const auto& ep = conn.endpoints[j];
-                std::string ep_prefix = prefix + ".endpoints[" + std::to_string(j) + "]";
-                if (!validateNotEmpty(ep_prefix + ".host", ep.host, error)) {
-                    return false;
-                }
-                if (!validateRangeInt(ep_prefix + ".port", ep.port,
-                                     Defaults::MIN_PORT, Defaults::MAX_PORT, error)) {
-                    return false;
-                }
-            }
-
-            if (!validateNotEmpty(prefix + ".item_name", conn.item_name, error)) {
-                return false;
-            }
-
-            if (!validateMaxLength(prefix + ".item_name", conn.item_name,
-                                  Defaults::MAX_ITEM_NAME_LEN, error)) {
-                return false;
-            }
-
-            if (!validateNotEmpty(prefix + ".client_id", conn.client_id, error)) {
-                return false;
-            }
-
-            if (!validateMaxLength(prefix + ".client_id", conn.client_id,
-                                  Defaults::MAX_CLIENT_ID_LEN, error)) {
-                return false;
-            }
+            if (!validateConnection(config.connections[i], i, error)) return false;
         }
-        
-        // Validate memory pool config (if provided)
-        if (!config.pool_config.empty()) {
-            if (config.pool_config.size() != MemoryPool::NUM_SIZE_CLASSES) {
-                error = "Memory pool must have exactly " + 
-                        std::to_string(MemoryPool::NUM_SIZE_CLASSES) + " size classes";
-                return false;
-            }
-            
-            for (size_t i = 0; i < config.pool_config.size(); ++i) {
-                const auto& cls = config.pool_config[i];
-                std::string prefix = "memory_pool.class_" + std::to_string(i);
-                
-                if (cls.initial_count > cls.max_total_allocated) {
-                    error = prefix + ".initial (" + std::to_string(cls.initial_count) + 
-                            ") cannot exceed max_total (" + std::to_string(cls.max_total_allocated) + ")";
-                    return false;
-                }
-                
-                if (cls.max_count > cls.max_total_allocated) {
-                    error = prefix + ".max_free (" + std::to_string(cls.max_count) + 
-                            ") cannot exceed max_total (" + std::to_string(cls.max_total_allocated) + ")";
-                    return false;
-                }
-            }
-        }
-        
+
+        if (!validatePoolConfig(config, error)) return false;
+
         return true;
     }
 }

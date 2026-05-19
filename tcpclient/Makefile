@@ -94,7 +94,7 @@ test: $(TEST_BIN)
 	@./$(TEST_BIN)
 
 $(TEST_BIN): $(TEST_SRC) $(HEADERS)
-	$(CXX) $(CXXFLAGS_DEBUG) -I. $(TEST_SRC) -o $(TEST_BIN) $(LDFLAGS_DEBUG)
+	$(CXX) $(CXXFLAGS_DEBUG) -I. $(TEST_SRC) config_parser.cpp log_msg.cpp -o $(TEST_BIN) $(LDFLAGS_DEBUG)
 
 # Clean test binaries too
 clean:
