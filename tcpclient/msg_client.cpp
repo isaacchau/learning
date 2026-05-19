@@ -4,6 +4,7 @@
 
 #include <cstdlib>
 #include <string>
+#include <string>
 
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -25,6 +26,8 @@
 // ============================================================================
 // ConnectionConfig Validation
 // ============================================================================
+// Validates user-supplied connection settings before they are used.
+// Returns an empty string on success, or a human-readable error message.
 
 std::string ConnectionConfig::validate() const {
     // Endpoint validation
@@ -495,6 +498,7 @@ bool MsgClient::connectToServer(size_t conn_idx) {
     }
 
     // Set connect timeout via SO_SNDTIMEO (5 seconds)
+    // Prevents connect() from hanging indefinitely on unreachable hosts.
     struct timeval tv;
     tv.tv_sec  = 5;
     tv.tv_usec = 0;
@@ -503,6 +507,7 @@ bool MsgClient::connectToServer(size_t conn_idx) {
     }
 
     // Disable Nagle's algorithm for low latency
+    // Nagle batches small sends, which hurts our tiny subscription request.
     int flag = 1;
     if (::setsockopt(conn.socket_guard.get(), IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0) {
         LOG_WARN("[MsgClient][Conn %zu] Failed to set TCP_NODELAY: %s", conn_idx, strerror(errno));
@@ -645,7 +650,25 @@ void MsgClient::handleConnectFailure(size_t conn_idx, const char* reason) {
 }
 
 // ============================================================================
-// IO Thread: manage multiple connections with poll()
+// IO Thread: epoll-based multi-connection I/O
+// ============================================================================
+// The IO thread is the only thread that calls connect(), recv(), and close()
+// on sockets.  It maintains a RecvState per connection to handle partial
+// messages across multiple recv() calls.
+//
+// Message framing:
+//   1. Read TcpResponse header (10 bytes) to get respLen.
+//   2. Validate respLen is within [MIN_MSG_LEN, MAX_MSG_LEN].
+//   3. Once respLen bytes are available, create a RawMessage referencing
+//      the receive buffer and push it to raw_queue_.
+//   4. Any trailing bytes belong to the next message; copy them to a new
+//      buffer so the current buffer can be forwarded to the decoder.
+//
+// Why copy trailing bytes instead of slicing the same buffer?
+//   - Each RawMessage needs a contiguous buffer reference.  A shared_ptr
+//     cannot represent a sub-range of an array without extra bookkeeping.
+//   - Copying the small tail (usually < one message) is cheaper than the
+//     complexity of multi-message buffer management.
 // ============================================================================
 
 void MsgClient::ioLoop() {
@@ -879,6 +902,19 @@ void MsgClient::ioLoop() {
 // ============================================================================
 // Decoder Thread: parse raw → SubMessage, round-robin to per-worker queues
 // ============================================================================
+// The decoder thread is the single consumer of raw_queue_ and the single
+// producer for all decoded_queues_.  It performs the only parsing of the
+// wire format, keeping the IO thread lightweight.
+//
+// Zero-copy design:
+//   - SubMessage holds a shared_ptr to the SAME Buffer as RawMessage.
+//   - Only pointers and lengths are copied; no message body data is moved.
+//   - The Buffer stays alive until the last worker releases its reference.
+//
+// Round-robin load balancing:
+//   - Simple modulo distribution ensures even spreading across workers.
+//   - No need for work-stealing because all messages are independent.
+// ============================================================================
 
 void MsgClient::decoderLoop() {
     size_t worker_idx = 0;
@@ -929,6 +965,21 @@ void MsgClient::decoderLoop() {
 
 // ============================================================================
 // Worker Thread: pop from per-worker queue, invoke handler
+// ============================================================================
+// Each worker thread owns one decoded_queues_[worker_index].  There is no
+// contention between workers — each has exclusive consume access.
+//
+// Aggregation pipeline (optional):
+//   - If aggregation_config.enabled == true, the worker parses the message
+//     body to extract market-data fields and feeds them into the appropriate
+//     Aggregator (orders, trades, or quotes).
+//   - Aggregators are thread-safe internally (sharded by hash of tags).
+//   - Flushing happens asynchronously via DiskWriter.
+//
+// Handler invocation:
+//   - The user-supplied handler_ is called for EVERY message, even when
+//     aggregation is enabled.  This gives the user full control.
+//   - handler_ receives (SubMessage, worker_index, connection_id).
 // ============================================================================
 
 void MsgClient::workerLoop(size_t worker_index) {
@@ -1041,6 +1092,8 @@ void MsgClient::workerLoop(size_t worker_index) {
         stats_.messages_processed.fetch_add(1, std::memory_order_relaxed);
 
         // Release buffer reference
+        // Explicit reset() here documents the hand-off: the buffer may still be
+        // alive if the user's handler captured a copy of msg.buffer.
         msg.buffer.reset();
     }
 }

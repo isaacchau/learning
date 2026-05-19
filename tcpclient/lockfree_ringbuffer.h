@@ -1,3 +1,20 @@
+// ============================================================================
+// lockfree_ringbuffer.h — Single-Producer-Single-Consumer lock-free ring buffer
+// ============================================================================
+// Used for all inter-thread queues in the MsgClient pipeline.
+//
+// Design notes:
+//   - Power-of-2 sizing with bitwise AND for fast modulo.
+//   - Head and tail are cache-line aligned to prevent false sharing.
+//   - Progressive spin-backoff (yield → 1µs → 10µs → 100µs → 1ms)
+//     reduces CPU burn under sustained contention without kernel futexes.
+//
+// Limitations:
+//   - Single producer, single consumer only.  Multiple producers OR
+//     multiple consumers will race and corrupt the queue.
+//   - T must be movable (used with std::move in pop).
+// ============================================================================
+
 #ifndef LOCKFREE_RINGBUFFER_H
 #define LOCKFREE_RINGBUFFER_H
 

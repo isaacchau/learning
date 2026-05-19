@@ -1,3 +1,25 @@
+// ============================================================================
+// shared_ptr_pool.h — Size-class memory pool with custom shared_ptr deleters
+// ============================================================================
+// Provides zero-copy buffer sharing across the three-stage pipeline.
+//
+// Why a pool instead of malloc/free per message?
+//   - Eliminates allocation overhead on the hot path (IO thread).
+//   - Prevents heap fragmentation under sustained high throughput.
+//   - Bounded memory usage (max_total_allocated per size class).
+//
+// Security:
+//   - Buffers are zeroed (memset) before returning to the free list.
+//   - This prevents stale message data from leaking to future allocations.
+//   - The zeroing happens in the worker thread, not the IO thread.
+//
+// Usage:
+//   MemoryPool pool;
+//   std::shared_ptr<Buffer> buf = pool.allocate(4096);
+//   // ... use buf->data ...
+//   // buf returns to pool automatically when last shared_ptr is destroyed
+// ============================================================================
+
 #ifndef SHARED_PTR_POOL_H
 #define SHARED_PTR_POOL_H
 

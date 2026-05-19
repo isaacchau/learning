@@ -1,3 +1,18 @@
+// ============================================================================
+// msg_client.h — Multi-connection TCP message streaming client
+// ============================================================================
+// This header defines the core client class, configuration structures,
+// and the RAII SocketGuard.  See doc/03_Architecture.md for the design.
+//
+// Threading model:
+//   - One IO thread (epoll_wait + recv)
+//   - One decoder thread (parse wire format → SubMessage)
+//   - N worker threads (user MessageHandler, configurable 1–64)
+//
+// All inter-thread communication uses single-producer-single-consumer
+// lock-free ring buffers (LockFreeRingBuffer) to avoid mutex contention.
+// ============================================================================
+
 #ifndef MSG_CLIENT_H
 #define MSG_CLIENT_H
 
@@ -20,7 +35,15 @@
 #include <unistd.h>      // For close()
 
 // ============================================================================
-// RAII Socket Wrapper - ensures socket is always closed properly
+// RAII Socket Wrapper
+// ============================================================================
+// Encapsulates a file descriptor so it is always closed (and shutdown)
+// when the guard goes out of scope or is reset.  This prevents fd leaks
+// on every error path without manual close() calls.
+//
+// Why atomic<int> for fd_?
+//   The IO thread reads fd_ via get() while stop() may call close() from
+//   another thread.  Atomic load/store avoids data races.
 // ============================================================================
 
 class SocketGuard {
@@ -82,6 +105,14 @@ private:
 // ============================================================================
 // Configuration Constants
 // ============================================================================
+// Hard-coded defaults used when no CLI argument, environment variable,
+// or JSON config entry overrides them.
+//
+// Queue sizing notes:
+//   - raw_queue_size is shared across ALL connections (single SPSC).
+//   - decoded_queue_size is PER WORKER (each worker has its own SPSC).
+//   - Both are rounded up to the next power of 2 internally.
+// ============================================================================
 
 // Default configuration values
 namespace Defaults {
@@ -117,7 +148,7 @@ namespace Defaults {
 
     // Push wait timeout for queues (when full)
     // NOTE: This uses a "drop" strategy rather than backpressure.
-    // 
+    //
     // Why drop instead of backpressure?
     // - Backpressure (stopping recv()) causes TCP buffer buildup
     // - This can exhaust server memory when serving multiple clients
@@ -153,6 +184,10 @@ namespace Defaults {
 
 // ============================================================================
 // Endpoint Configuration (one IP:port pair)
+// ============================================================================
+// A connection may have multiple endpoints for failover.  The client
+// round-robins through them when consecutive failures exceed
+// max_retries_per_endpoint.
 // ============================================================================
 
 struct EndpointConfig {
@@ -249,6 +284,14 @@ struct ResolvedEndpoint {
 // ============================================================================
 // Per-Connection State
 // ============================================================================
+// Mutable runtime state for a single logical connection.  Stored in a
+// vector inside MsgClient and accessed ONLY by the IO thread (except
+// for atomic counters which may be read by getStats()).
+//
+// Why unique_ptr<ConnectionState>?
+//   ConnectionState is non-copyable/non-movable (contains atomic members).
+//   unique_ptr lets us store it in a standard container.
+// ============================================================================
 
 struct ConnectionState {
     ConnectionConfig config;                    // Connection configuration
@@ -282,6 +325,14 @@ struct ConnectionState {
 
 // ============================================================================
 // Statistics (atomic counters, relaxed ordering)
+// ============================================================================
+// All counters use memory_order_relaxed because:
+//   - They are independent (no ordering constraints between them)
+//   - They are only for human-readable diagnostics, not correctness
+//   - Relaxed ordering is the fastest atomic mode on x86 and ARM
+//
+// If you need exact point-in-time consistency across counters,
+// call getStats() — it reads each counter atomically.
 // ============================================================================
 
 struct MsgClientStats {
@@ -324,6 +375,20 @@ using MessageHandler = std::function<void(const SubMessage& msg, size_t worker_i
 
 // ============================================================================
 // MsgClient — Multi-connection Three-stage Lock-Free Pipeline TCP Client
+// ============================================================================
+//
+// Stage 1 — IO Thread (ioLoop):
+//   epoll_wait on all connected sockets → recv() → push RawMessage to raw_queue_
+//
+// Stage 2 — Decoder Thread (decoderLoop):
+//   pop RawMessage → parse TcpResponse + MsgHdr → build SubMessage →
+//   round-robin push to one of decoded_queues_[i]
+//
+// Stage 3 — Worker Threads (workerLoop):
+//   pop SubMessage from decoded_queues_[worker_index] → invoke user handler_
+//
+// All messages hold shared_ptr<Buffer> references into pooled memory;
+// no message data is copied between stages.
 // ============================================================================
 
 class MsgClient {
@@ -385,6 +450,7 @@ private:
     std::vector<std::unique_ptr<LockFreeRingBuffer<SubMessage>>> decoded_queues_;
 
     // Connection states (one per configured connection)
+    // Accessed ONLY by the IO thread (except atomic counters read by getStats)
     std::vector<std::unique_ptr<ConnectionState>> connections_;
 
     // Threads
@@ -392,26 +458,29 @@ private:
     std::thread decoder_thread_;
     std::vector<std::thread> worker_threads_;
 
-    // Message handler
+    // User-supplied callback invoked by each worker for every decoded message
     MessageHandler handler_;
 
-    // Control flag
+    // Control flag — set to false in stop() to signal all threads to exit
     std::atomic<bool> running_;
 
-    // Global statistics
+    // Global statistics (relaxed atomic counters)
     MsgClientStats stats_;
     
     // Epoll instance for efficient multi-connection I/O (Linux only)
     std::atomic<int> epoll_fd_;
 
     // Cached environment-derived constants (read once at construction)
+    // Reading getenv on every connect() would be racy and slow; cache them here.
     size_t recv_buffer_size_ = 0;
     int    tcp_keepidle_ = 0;
     int    tcp_keepintvl_ = 0;
     int    tcp_keepcnt_ = 0;
     int    tcp_rcvbuf_ = 0;
     
-    // Aggregation components
+    // Aggregation components (optional metrics pipeline)
+    // If aggregation_config.enabled == true, these feed market-data events
+    // into time-bucketed aggregators that flush to disk via DiskWriter.
     std::unique_ptr<metrics::DiskWriter> disk_writer_;
     std::unique_ptr<metrics::Aggregator> orders_aggregator_;
     std::unique_ptr<metrics::Aggregator> trades_aggregator_;

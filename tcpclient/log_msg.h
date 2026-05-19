@@ -1,3 +1,18 @@
+// ============================================================================
+// log_msg.h — Thread-safe singleton logger with syslog-compatible levels
+// ============================================================================
+// Provides LOG_INFO, LOG_ERR, LOG_DEBUG, etc. macros that forward to a
+// singleton LogMsg instance.  Supports stdout, file, and syslog outputs
+// with independent verbosity thresholds.
+//
+// Usage:
+//   LogMsg::getInstance().init(argv[0], "./log");
+//   LOG_INFO("Connected to %s:%d", host, port);
+//
+// Thread safety:
+//   All public methods are thread-safe (internally synchronized).
+// ============================================================================
+
 #ifndef LOG_MSG_H
 #define LOG_MSG_H
 

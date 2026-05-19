@@ -1,3 +1,17 @@
+// ============================================================================
+// protocol.h — Wire-format protocol and internal pipeline message types
+// ============================================================================
+// Defines the packed binary format exchanged between client and server,
+// plus the internal RawMessage / SubMessage structs used in the pipeline.
+//
+// All wire structs use #pragma pack(push, 1) to eliminate padding.
+// This guarantees exact sizes and compatible layout across compilers.
+//
+// Environment overrides:
+//   APP_TCP_MAGIC_KEY        — override protocol magic key (default 0xCAFEBABE)
+//   APP_TCP_RECV_BUFFER_SIZE — override user-space recv buffer (default 64KB)
+// ============================================================================
+
 #ifndef PROTOCOL_H
 #define PROTOCOL_H
 

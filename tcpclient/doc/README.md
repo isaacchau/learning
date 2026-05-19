@@ -18,7 +18,6 @@ Welcome! This documentation is designed for developers who haven't used C++ in a
 | [04_Protocol.md](04_Protocol.md) | Binary protocol format, sequence numbers, wire format |
 | [05_Build_and_Run.md](05_Build_and_Run.md) | Build instructions, running, troubleshooting, performance tuning, config files |
 | [06_Glossary.md](06_Glossary.md) | Terms and definitions |
-| [08_Memory_Tuning.md](08_Memory_Tuning.md) | Memory usage estimation and tuning |
 | [07_Analysis_Tools.md](07_Analysis_Tools.md) | Static analysis, sanitizers, debugging tools |
 | [08_Memory_Tuning.md](08_Memory_Tuning.md) | Memory usage estimation, tuning, and optimization |
 
