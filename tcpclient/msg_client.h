@@ -454,6 +454,17 @@ private:
     void closeConnection(size_t conn_idx);
     void closeAllSockets();
 
+    // IO loop helpers (extracted for readability)
+    bool tryActivateConnection(size_t conn_idx);
+    int computeEpollTimeoutMs(
+        const std::vector<bool>& connected,
+        const std::chrono::steady_clock::time_point& now) const;
+    size_t parseMessagesFromBuffer(
+        size_t conn_idx, char* buf_data, size_t buf_used,
+        std::shared_ptr<Buffer>& buf_ref, bool& parse_error);
+    bool processRecvData(size_t conn_idx, char* buf_data, size_t& buf_used,
+                         size_t buf_capacity, std::shared_ptr<Buffer>& buf_ref);
+
     // Statistics helper
     ConnectionStats buildConnectionStats(size_t conn_idx) const;
 

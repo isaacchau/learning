@@ -343,13 +343,26 @@ void MsgClient::stop() {
     // Close epoll_fd to wake up epoll_wait immediately (it will return EBADF)
     int epoll_fd_local = epoll_fd_.exchange(-1);
     if (epoll_fd_local >= 0) {
+        // TSAN reports a race because epoll_wait reads the fd
+        // while main thread calls close().  This is a benign race
+        // in practice: epoll_wait either succeeds (fd still open)
+        // or returns EBADF (fd closed).  Both are handled.
+        // We avoid atomic_thread_fence (not supported under TSAN)
+        // and instead rely on closeAllSockets() above to unblock
+        // epoll via EPOLLHUP before we close the epoll fd.
+        //
+        // To fully silence TSAN we join the IO thread first, then close.
+        // The IO thread will observe epoll_fd_ == -1 and exit its loop.
+        if (io_thread_.joinable()) {
+            io_thread_.join();
+        }
         ::close(epoll_fd_local);
-    }
-
-    // Join threads in pipeline order (producers → consumers) so workers
-    // finish processing everything already in the queues.
-    if (io_thread_.joinable()) {
-        io_thread_.join();
+    } else {
+        // Join threads in pipeline order (producers → consumers) so workers
+        // finish processing everything already in the queues.
+        if (io_thread_.joinable()) {
+            io_thread_.join();
+        }
     }
     if (decoder_thread_.joinable()) {
         decoder_thread_.join();
@@ -742,18 +755,173 @@ void MsgClient::handleConnectFailure(size_t conn_idx, const char* reason) {
 //   be counter-productive — TCP keepalive handles dead peers.
 // ============================================================================
 
+// Per-connection receive state (local to ioLoop)
+struct RecvState {
+    std::shared_ptr<Buffer> recv_buf;
+    size_t recv_used = 0;
+};
+
+// Try to connect, subscribe, and allocate recv buffer for a single connection.
+// Returns true if the connection is now active.
+bool MsgClient::tryActivateConnection(size_t conn_idx) {
+    ConnectionState& conn = *connections_[conn_idx];
+
+    if (!connectToServer(conn_idx)) {
+        handleConnectFailure(conn_idx, "Connection failed");
+        return false;
+    }
+
+    conn.last_recv_time_ = std::chrono::steady_clock::now();
+
+    if (!sendSubscription(conn_idx)) {
+        closeConnection(conn_idx);
+        handleConnectFailure(conn_idx, "Subscription failed");
+        return false;
+    }
+
+    LOG_INFO("[MsgClient][Conn %zu] Stream active on %s:%u",
+             conn_idx, conn.activeEndpoint().host.c_str(), conn.activeEndpoint().port);
+    return true;
+}
+
+// Compute epoll timeout so we wake up when the next disconnected connection
+// is due for retry, but don't exceed POLL_TIMEOUT_MS.
+int MsgClient::computeEpollTimeoutMs(
+    const std::vector<bool>& connected,
+    const std::chrono::steady_clock::time_point& now) const {
+
+    auto next_event = now + std::chrono::milliseconds(Defaults::POLL_TIMEOUT_MS);
+    for (size_t i = 0; i < connections_.size(); ++i) {
+        if (!connected[i] && connections_[i]->next_retry_time_ < next_event) {
+            next_event = connections_[i]->next_retry_time_;
+        }
+    }
+    int timeout_ms = static_cast<int>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(next_event - now).count());
+    return timeout_ms < 0 ? 0 : timeout_ms;
+}
+
+// Parse all complete messages from the receive buffer and push them to raw_queue_.
+// Returns the new parse position.  Sets parse_error if a protocol error occurs.
+size_t MsgClient::parseMessagesFromBuffer(
+    size_t conn_idx, char* buf_data, size_t buf_used,
+    std::shared_ptr<Buffer>& buf_ref, bool& parse_error) {
+
+    size_t parse_pos = 0;
+    parse_error = false;
+
+    while (parse_pos + sizeof(TcpResponse) <= buf_used) {
+        TcpResponse resp;
+        std::memcpy(&resp, buf_data + parse_pos, sizeof(TcpResponse));
+
+        if (resp.respLen < MIN_MSG_LEN || resp.respLen > MAX_MSG_LEN) {
+            LOG_ERR("[MsgClient][Conn %zu] Invalid msgLen: %u", conn_idx, resp.respLen);
+            stats_.parse_errors.fetch_add(1, std::memory_order_relaxed);
+            parse_error = true;
+            break;
+        }
+
+        if (parse_pos + resp.respLen > buf_used) {
+            break; // Incomplete — wait for more data
+        }
+
+        RawMessage raw;
+        raw.buffer        = buf_ref;
+        raw.offset        = parse_pos;
+        raw.length        = resp.respLen;
+        raw.seq_num       = resp.respSeq;
+        raw.connection_id = conn_idx;
+
+        connections_[conn_idx]->last_received_seq_.store(resp.respSeq, std::memory_order_relaxed);
+
+        if (!raw_queue_->push_wait(std::move(raw), config_.queue_push_timeout_ms)) {
+            stats_.messages_dropped.fetch_add(1, std::memory_order_relaxed);
+            LOG_WARN("[MsgClient][Conn %zu] Message dropped: raw queue full (seq=%lu)",
+                     conn_idx, raw.seq_num);
+        }
+
+        connections_[conn_idx]->messages_received_.fetch_add(1, std::memory_order_relaxed);
+        stats_.messages_received.fetch_add(1, std::memory_order_relaxed);
+        parse_pos += resp.respLen;
+    }
+
+    return parse_pos;
+}
+
+// Receive data from a connection and parse messages.
+// Returns false if the connection should be closed.
+bool MsgClient::processRecvData(
+    size_t conn_idx, char* buf_data, size_t& buf_used,
+    size_t buf_capacity, std::shared_ptr<Buffer>& buf_ref) {
+
+    size_t space = buf_capacity - buf_used;
+    if (space == 0) {
+        LOG_WARN("[MsgClient][Conn %zu] Recv buffer full, no complete message", conn_idx);
+        stats_.parse_errors.fetch_add(1, std::memory_order_relaxed);
+        buf_ref = pool_->allocate(recv_buffer_size_);
+        if (!buf_ref) {
+            LOG_ERR("[MsgClient][Conn %zu] Failed to allocate receive buffer", conn_idx);
+            return false;
+        }
+        buf_used = 0;
+        return true;
+    }
+
+    ssize_t bytes_read = ::recv(connections_[conn_idx]->socket_guard.get(),
+                                buf_data + buf_used, space, 0);
+    if (bytes_read <= 0) {
+        if (bytes_read == 0) {
+            LOG_INFO("[MsgClient][Conn %zu] Server closed connection", conn_idx);
+        } else {
+            LOG_ERR("[MsgClient][Conn %zu] recv() error: %s", conn_idx, strerror(errno));
+        }
+        return false;
+    }
+
+    connections_[conn_idx]->last_recv_time_ = std::chrono::steady_clock::now();
+
+    buf_used += static_cast<size_t>(bytes_read);
+    connections_[conn_idx]->bytes_received_.fetch_add(static_cast<uint64_t>(bytes_read), std::memory_order_relaxed);
+    stats_.bytes_received.fetch_add(static_cast<uint64_t>(bytes_read), std::memory_order_relaxed);
+
+    bool parse_error = false;
+    size_t parse_pos = parseMessagesFromBuffer(conn_idx, buf_data, buf_used, buf_ref, parse_error);
+
+    if (parse_error) {
+        buf_ref = pool_->allocate(recv_buffer_size_);
+        if (!buf_ref) {
+            LOG_ERR("[MsgClient][Conn %zu] Failed to allocate receive buffer", conn_idx);
+            return false;
+        }
+        buf_used = 0;
+    } else {
+        size_t remaining = buf_used - parse_pos;
+        if (remaining > 0) {
+            auto new_buf = pool_->allocate(recv_buffer_size_);
+            if (!new_buf) {
+                LOG_ERR("[MsgClient][Conn %zu] Failed to allocate buffer for partial data", conn_idx);
+                return false;
+            }
+            std::memcpy(new_buf->data, buf_data + parse_pos, remaining);
+            buf_ref = std::move(new_buf);
+            buf_used = remaining;
+        } else {
+            buf_ref = pool_->allocate(recv_buffer_size_);
+            if (!buf_ref) {
+                LOG_ERR("[MsgClient][Conn %zu] Failed to allocate fresh receive buffer", conn_idx);
+                return false;
+            }
+            buf_used = 0;
+        }
+    }
+
+    return true;
+}
+
 void MsgClient::ioLoop() {
-    // Per-connection receive state
-    struct RecvState {
-        std::shared_ptr<Buffer> recv_buf;
-        size_t recv_used = 0;
-    };
     std::vector<RecvState> recv_states(connections_.size());
-    
-    // Track which connections are currently connected
     std::vector<bool> connected(connections_.size(), false);
-    
-    // Initialize all connections as needing to connect
+
     for (size_t i = 0; i < connections_.size(); ++i) {
         connections_[i]->current_reconnect_delay_ms_ = config_.reconnect_interval_ms;
         connections_[i]->next_retry_time_ = std::chrono::steady_clock::time_point();
@@ -763,197 +931,59 @@ void MsgClient::ioLoop() {
         auto now = std::chrono::steady_clock::now();
 
         // Try to connect any disconnected connections that are due for retry
-        for (size_t i = 0; i < connections_.size(); ++i) {
-            if (!connected[i] && running_.load()) {
-                ConnectionState& conn = *connections_[i];
-
+        for (size_t conn_idx = 0; conn_idx < connections_.size(); ++conn_idx) {
+            if (!connected[conn_idx] && running_.load()) {
+                ConnectionState& conn = *connections_[conn_idx];
                 if (now < conn.next_retry_time_) {
-                    continue;  // Not yet time to retry
-                }
-
-                if (!connectToServer(i)) {
-                    handleConnectFailure(i, "Connection failed");
                     continue;
                 }
-
-                conn.last_recv_time_ = now;
-
-                if (!sendSubscription(i)) {
-                    closeConnection(i);
-                    handleConnectFailure(i, "Subscription failed");
-                    continue;
+                if (tryActivateConnection(conn_idx)) {
+                    recv_states[conn_idx].recv_buf = pool_->allocate(recv_buffer_size_);
+                    if (!recv_states[conn_idx].recv_buf) {
+                        LOG_ERR("[MsgClient][Conn %zu] Failed to allocate receive buffer, reconnecting...", conn_idx);
+                        closeConnection(conn_idx);
+                        handleConnectFailure(conn_idx, "Buffer allocation failed");
+                        continue;
+                    }
+                    recv_states[conn_idx].recv_used = 0;
+                    conn.consecutive_failures_on_endpoint = 0;
+                    conn.current_reconnect_delay_ms_ = config_.reconnect_interval_ms;
+                    connected[conn_idx] = true;
                 }
-
-                recv_states[i].recv_buf = pool_->allocate(recv_buffer_size_);
-                if (!recv_states[i].recv_buf) {
-                    LOG_ERR("[MsgClient][Conn %zu] Failed to allocate receive buffer, reconnecting...", i);
-                    closeConnection(i);
-                    handleConnectFailure(i, "Buffer allocation failed");
-                    continue;
-                }
-                recv_states[i].recv_used = 0;
-
-                conn.consecutive_failures_on_endpoint = 0;
-                conn.current_reconnect_delay_ms_ = config_.reconnect_interval_ms;
-                connected[i] = true;
-
-                LOG_INFO("[MsgClient][Conn %zu] Stream active on %s:%u",
-                         i, conn.activeEndpoint().host.c_str(), conn.activeEndpoint().port);
             }
         }
 
-        // Compute epoll timeout: wake up when the next disconnected connection
-        // is due for retry, but don't exceed POLL_TIMEOUT_MS.
-        auto next_event = now + std::chrono::milliseconds(Defaults::POLL_TIMEOUT_MS);
-        for (size_t i = 0; i < connections_.size(); ++i) {
-            if (!connected[i]) {
-                if (connections_[i]->next_retry_time_ < next_event) {
-                    next_event = connections_[i]->next_retry_time_;
-                }
-            }
-        }
-        int epoll_timeout_ms = static_cast<int>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(next_event - now).count());
-        if (epoll_timeout_ms < 0) epoll_timeout_ms = 0;
+        int epoll_timeout_ms = computeEpollTimeoutMs(connected, now);
 
-        // Wait for events using epoll
         struct epoll_event events[Defaults::MAX_CONNECTIONS];
         int ret = ::epoll_wait(epoll_fd_.load(), events, Defaults::MAX_CONNECTIONS, epoll_timeout_ms);
-        
+
         if (ret < 0) {
             if (errno == EINTR) continue;
-            if (errno == EBADF && !running_.load()) continue;  // shutting down
+            if (errno == EBADF && !running_.load()) continue;
             LOG_ERR("[MsgClient] epoll_wait() error: %s", strerror(errno));
             continue;
         }
 
-        // Process each event (ret = number of ready sockets)
-        for (int eidx = 0; eidx < ret; ++eidx) {
-            size_t conn_idx = events[eidx].data.u32;
+        for (int event_idx = 0; event_idx < ret; ++event_idx) {
+            size_t conn_idx = events[event_idx].data.u32;
             if (conn_idx >= connections_.size()) continue;
 
             bool should_close = false;
 
-            // Check for hard errors first
-            if (events[eidx].events & (EPOLLERR | EPOLLHUP)) {
+            if (events[event_idx].events & (EPOLLERR | EPOLLHUP)) {
                 should_close = true;
             }
 
-            if (events[eidx].events & EPOLLIN) {
-                // Receive data
-                {
-                    RecvState& recv_state = recv_states[conn_idx];
-                    size_t space = recv_state.recv_buf->capacity - recv_state.recv_used;
-                    if (space == 0) {
-                        LOG_WARN("[MsgClient][Conn %zu] Recv buffer full, no complete message", conn_idx);
-                        stats_.parse_errors.fetch_add(1, std::memory_order_relaxed);
-                        recv_state.recv_buf = pool_->allocate(recv_buffer_size_);
-                        if (!recv_state.recv_buf) {
-                            LOG_ERR("[MsgClient][Conn %zu] Failed to allocate receive buffer", conn_idx);
-                            should_close = true;
-                        } else {
-                            recv_state.recv_used = 0;
-                        }
-                    } else {
-                        ssize_t n = ::recv(connections_[conn_idx]->socket_guard.get(),
-                                           recv_state.recv_buf->data + recv_state.recv_used, space, 0);
-                        if (n <= 0) {
-                            if (n == 0) {
-                                LOG_INFO("[MsgClient][Conn %zu] Server closed connection", conn_idx);
-                            } else {
-                                LOG_ERR("[MsgClient][Conn %zu] recv() error: %s", conn_idx, strerror(errno));
-                            }
-                            should_close = true;
-                        } else {
-                            // Update last receive time for connection health check
-                            connections_[conn_idx]->last_recv_time_ = std::chrono::steady_clock::now();
-
-                            recv_state.recv_used += static_cast<size_t>(n);
-                            connections_[conn_idx]->bytes_received_.fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
-                            stats_.bytes_received.fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
-
-                            // Parse complete messages from the buffer
-                            size_t parse_pos = 0;
-                            bool parse_error = false;
-
-                            while (parse_pos + sizeof(TcpResponse) <= recv_state.recv_used) {
-                                // Read TcpResponse header
-                                TcpResponse resp;
-                                std::memcpy(&resp, recv_state.recv_buf->data + parse_pos, sizeof(TcpResponse));
-
-                                // Validate message length
-                                if (resp.respLen < MIN_MSG_LEN || resp.respLen > MAX_MSG_LEN) {
-                                    LOG_ERR("[MsgClient][Conn %zu] Invalid msgLen: %u", conn_idx, resp.respLen);
-                                    stats_.parse_errors.fetch_add(1, std::memory_order_relaxed);
-                                    parse_error = true;
-                                    break;
-                                }
-
-                                // Check if we have the complete message
-                                if (parse_pos + resp.respLen > recv_state.recv_used) {
-                                    break; // Incomplete — wait for more data
-                                }
-
-                                // Complete message — create RawMessage
-                                RawMessage raw;
-                                raw.buffer       = recv_state.recv_buf;
-                                raw.offset       = parse_pos;
-                                raw.length       = resp.respLen;
-                                raw.seq_num      = resp.respSeq;
-                                raw.connection_id = conn_idx;
-
-                                // Track the highest sequence number received for this connection
-                                connections_[conn_idx]->last_received_seq_.store(resp.respSeq, std::memory_order_relaxed);
-
-                                if (!raw_queue_->push_wait(std::move(raw), config_.queue_push_timeout_ms)) {
-                                    stats_.messages_dropped.fetch_add(1, std::memory_order_relaxed);
-                                    LOG_WARN("[MsgClient][Conn %zu] Message dropped: raw queue full (seq=%lu)",
-                                             conn_idx, raw.seq_num);
-                                }
-
-                                connections_[conn_idx]->messages_received_.fetch_add(1, std::memory_order_relaxed);
-                                stats_.messages_received.fetch_add(1, std::memory_order_relaxed);
-                                parse_pos += resp.respLen;
-                            }
-
-                            if (parse_error) {
-                                // Reset buffer on protocol error
-                                recv_state.recv_buf = pool_->allocate(recv_buffer_size_);
-                                if (!recv_state.recv_buf) {
-                                    LOG_ERR("[MsgClient][Conn %zu] Failed to allocate receive buffer", conn_idx);
-                                    should_close = true;
-                                } else {
-                                    recv_state.recv_used = 0;
-                                }
-                            } else {
-                                // Handle remaining partial data
-                                size_t remaining = recv_state.recv_used - parse_pos;
-                                if (remaining > 0) {
-                                    auto new_buf = pool_->allocate(recv_buffer_size_);
-                                    if (!new_buf) {
-                                        LOG_ERR("[MsgClient][Conn %zu] Failed to allocate buffer for partial data", conn_idx);
-                                        should_close = true;
-                                    } else {
-                                        std::memcpy(new_buf->data, recv_state.recv_buf->data + parse_pos, remaining);
-                                        recv_state.recv_buf = std::move(new_buf);
-                                        recv_state.recv_used = remaining;
-                                    }
-                                } else {
-                                    recv_state.recv_buf = pool_->allocate(recv_buffer_size_);
-                                    if (!recv_state.recv_buf) {
-                                        LOG_ERR("[MsgClient][Conn %zu] Failed to allocate fresh receive buffer", conn_idx);
-                                        should_close = true;
-                                    } else {
-                                        recv_state.recv_used = 0;
-                                    }
-                                }
-                            }
-                        }
-                    }
+            if (events[event_idx].events & EPOLLIN) {
+                RecvState& rs = recv_states[conn_idx];
+                if (!processRecvData(conn_idx, rs.recv_buf->data, rs.recv_used,
+                                     rs.recv_buf->capacity, rs.recv_buf)) {
+                    should_close = true;
                 }
             }
 
-            if (events[eidx].events & EPOLLRDHUP) {
+            if (events[event_idx].events & EPOLLRDHUP) {
                 should_close = true;
             }
 
@@ -962,7 +992,7 @@ void MsgClient::ioLoop() {
                 closeConnection(conn_idx);
             }
         }
-        
+
         // Note: Intentionally no idle-timeout disconnect here.
         // Market data can legitimately be quiet for extended periods
         // (overnight, holidays, pre-open). Forcing a reconnect would

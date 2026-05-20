@@ -196,6 +196,189 @@ static ConnectionConfig makeDefaultConn() {
 }
 
 // ============================================================================
+// CLI option parsing helpers
+// ============================================================================
+// These helpers extract the giant if-else chain from main() into focused
+// functions that handle one category of options each.
+// ============================================================================
+
+// Parse a connection-specific CLI option.  Returns false on error.
+static bool parseConnectionOption(int argc, char* argv[], int& i,
+                                  ConnectionConfig& current_conn,
+                                  MsgClientConfig& config,
+                                  bool& has_connection) {
+  if ((strcmp(argv[i], "--host") == 0) && i + 1 < argc) {
+    if (has_connection) {
+      finalizeConnection(current_conn);
+      config.connections.push_back(current_conn);
+      current_conn = makeDefaultConn();
+    }
+    parseHostArg(argv[++i], current_conn);
+    has_connection = true;
+  } else if ((strcmp(argv[i], "--port") == 0) && i + 1 < argc) {
+    try {
+      int port = std::stoi(argv[++i]);
+      if (port < Defaults::MIN_PORT || port > Defaults::MAX_PORT) {
+        fprintf(stderr, "Error: Port must be between %d and %d\n",
+                Defaults::MIN_PORT, Defaults::MAX_PORT);
+        return false;
+      }
+      current_conn.default_port = static_cast<uint16_t>(port);
+      for (auto& ep : current_conn.endpoints) {
+        if (ep.port == 0) ep.port = current_conn.default_port;
+      }
+      has_connection = true;
+    } catch (...) {
+      fprintf(stderr, "Error: Invalid port number: %s\n", argv[i]);
+      return false;
+    }
+  } else if ((strcmp(argv[i], "--failover-retries") == 0) && i + 1 < argc) {
+    try {
+      int retries = std::stoi(argv[++i]);
+      if (retries < 1) {
+        fprintf(stderr, "Error: failover-retries must be >= 1\n");
+        return false;
+      }
+      current_conn.max_retries_per_endpoint = retries;
+      has_connection = true;
+    } catch (...) {
+      fprintf(stderr, "Error: Invalid failover-retries: %s\n", argv[i]);
+      return false;
+    }
+  } else if ((strcmp(argv[i], "--item") == 0) && i + 1 < argc) {
+    current_conn.item_name = argv[++i];
+    has_connection = true;
+  } else if ((strcmp(argv[i], "--client-id") == 0) && i + 1 < argc) {
+    current_conn.client_id = argv[++i];
+    has_connection = true;
+  } else if ((strcmp(argv[i], "--seq") == 0) && i + 1 < argc) {
+    try {
+      current_conn.starting_seq_num = std::stoull(argv[++i]);
+      has_connection = true;
+    } catch (...) {
+      fprintf(stderr, "Error: Invalid sequence number: %s\n", argv[i]);
+      return false;
+    }
+  }
+  return true;
+}
+
+// Parse a global (non-connection) CLI option.  Returns false on error.
+static bool parseGlobalOption(int argc, char* argv[], int& i,
+                              MsgClientConfig& config,
+                              int& stats_interval_sec,
+                              int& pool_stats_interval_sec,
+                              std::string& log_dir,
+                              int& log_stdout, int& log_file, int& log_syslog) {
+  if ((strcmp(argv[i], "--workers") == 0) && i + 1 < argc) {
+    try {
+      config.worker_thread_count = static_cast<size_t>(std::stoi(argv[++i]));
+    } catch (...) {
+      fprintf(stderr, "Error: Invalid worker count: %s\n", argv[i]);
+      return false;
+    }
+  } else if ((strcmp(argv[i], "--raw-queue") == 0) && i + 1 < argc) {
+    try {
+      config.raw_queue_size = static_cast<size_t>(std::stoi(argv[++i]));
+    } catch (...) {
+      fprintf(stderr, "Error: Invalid queue size: %s\n", argv[i]);
+      return false;
+    }
+  } else if ((strcmp(argv[i], "--dec-queue") == 0) && i + 1 < argc) {
+    try {
+      config.decoded_queue_size = static_cast<size_t>(std::stoi(argv[++i]));
+    } catch (...) {
+      fprintf(stderr, "Error: Invalid queue size: %s\n", argv[i]);
+      return false;
+    }
+  } else if ((strcmp(argv[i], "--reconnect") == 0) && i + 1 < argc) {
+    try {
+      config.reconnect_interval_ms = std::stoi(argv[++i]);
+    } catch (...) {
+      fprintf(stderr, "Error: Invalid reconnect interval: %s\n", argv[i]);
+      return false;
+    }
+  } else if ((strcmp(argv[i], "--queue-timeout") == 0) && i + 1 < argc) {
+    try {
+      config.queue_push_timeout_ms = std::stoi(argv[++i]);
+    } catch (...) {
+      fprintf(stderr, "Error: Invalid queue timeout: %s\n", argv[i]);
+      return false;
+    }
+  } else if ((strcmp(argv[i], "--stats-interval") == 0) && i + 1 < argc) {
+    try {
+      stats_interval_sec = std::stoi(argv[++i]);
+    } catch (...) {
+      fprintf(stderr, "Error: Invalid stats interval: %s\n", argv[i]);
+      return false;
+    }
+  } else if ((strcmp(argv[i], "--pool-stats-interval") == 0) && i + 1 < argc) {
+    try {
+      pool_stats_interval_sec = std::stoi(argv[++i]);
+      if (pool_stats_interval_sec < 0) {
+        fprintf(stderr, "Error: Pool stats interval must be >= 0\n");
+        return false;
+      }
+    } catch (...) {
+      fprintf(stderr, "Error: Invalid pool stats interval: %s\n", argv[i]);
+      return false;
+    }
+  } else if ((strcmp(argv[i], "--log-dir") == 0) && i + 1 < argc) {
+    log_dir = argv[++i];
+  } else if ((strcmp(argv[i], "--log-stdout") == 0) && i + 1 < argc) {
+    try {
+      log_stdout = std::stoi(argv[++i]);
+    } catch (...) {
+      fprintf(stderr, "Error: Invalid log stdout level: %s\n", argv[i]);
+      return false;
+    }
+  } else if ((strcmp(argv[i], "--log-file") == 0) && i + 1 < argc) {
+    try {
+      log_file = std::stoi(argv[++i]);
+    } catch (...) {
+      fprintf(stderr, "Error: Invalid log file level: %s\n", argv[i]);
+      return false;
+    }
+  } else if ((strcmp(argv[i], "--log-syslog") == 0) && i + 1 < argc) {
+    try {
+      log_syslog = std::stoi(argv[++i]);
+    } catch (...) {
+      fprintf(stderr, "Error: Invalid log syslog level: %s\n", argv[i]);
+      return false;
+    }
+  }
+  return true;
+}
+
+// Parse an aggregation-related CLI option.  Returns false on error.
+static bool parseAggregationOption(int argc, char* argv[], int& i,
+                                   MsgClientConfig& config) {
+  if (strcmp(argv[i], "--aggregation") == 0) {
+    config.aggregation_config.enabled = true;
+  } else if ((strcmp(argv[i], "--agg-window") == 0) && i + 1 < argc) {
+    try {
+      config.aggregation_config.window_ms = std::stoull(argv[++i]);
+      config.aggregation_config.enabled = true;
+    } catch (...) {
+      fprintf(stderr, "Error: Invalid aggregation window: %s\n", argv[i]);
+      return false;
+    }
+  } else if ((strcmp(argv[i], "--agg-format") == 0) && i + 1 < argc) {
+    std::string fmt = argv[++i];
+    if (fmt == "csv" || fmt == "CSV") {
+      config.aggregation_config.output_format = metrics::OutputFormat::CSV;
+    } else {
+      config.aggregation_config.output_format = metrics::OutputFormat::INFLUXDB_LINE;
+    }
+  } else if ((strcmp(argv[i], "--agg-output") == 0) && i + 1 < argc) {
+    config.aggregation_config.output_dir = argv[++i];
+  } else if ((strcmp(argv[i], "--agg-prefix") == 0) && i + 1 < argc) {
+    config.aggregation_config.filename_prefix = argv[++i];
+  }
+  return true;
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -253,166 +436,48 @@ int main(int argc, char *argv[]) {
     } else if (strcmp(argv[i], "--config-help") == 0) {
       printConfigFormat();
       return 0;
-    } else if ((strcmp(argv[i], "--host") == 0) && i + 1 < argc) {
-      // If we already have a connection building, finalize and save it
-      if (has_connection) {
-        finalizeConnection(current_conn);
-        config.connections.push_back(current_conn);
-        current_conn = makeDefaultConn();
-      }
-      parseHostArg(argv[++i], current_conn);
-      has_connection = true;
-    } else if ((strcmp(argv[i], "--port") == 0) && i + 1 < argc) {
-      try {
-        int port = std::stoi(argv[++i]);
-        if (port < Defaults::MIN_PORT || port > Defaults::MAX_PORT) {
-          fprintf(stderr, "Error: Port must be between %d and %d\n",
-                  Defaults::MIN_PORT, Defaults::MAX_PORT);
-          return 1;
-        }
-        current_conn.default_port = static_cast<uint16_t>(port);
-        // Update any existing endpoints that don't have an explicit port
-        for (auto& ep : current_conn.endpoints) {
-          if (ep.port == 0) {
-            ep.port = current_conn.default_port;
-          }
-        }
-        has_connection = true;
-      } catch (...) {
-        fprintf(stderr, "Error: Invalid port number: %s\n", argv[i]);
-        return 1;
-      }
-    } else if ((strcmp(argv[i], "--failover-retries") == 0) && i + 1 < argc) {
-      try {
-        int retries = std::stoi(argv[++i]);
-        if (retries < 1) {
-          fprintf(stderr, "Error: failover-retries must be >= 1\n");
-          return 1;
-        }
-        current_conn.max_retries_per_endpoint = retries;
-        has_connection = true;
-      } catch (...) {
-        fprintf(stderr, "Error: Invalid failover-retries: %s\n", argv[i]);
-        return 1;
-      }
-    } else if ((strcmp(argv[i], "--item") == 0) && i + 1 < argc) {
-      current_conn.item_name = argv[++i];
-      has_connection = true;
-    } else if ((strcmp(argv[i], "--client-id") == 0) && i + 1 < argc) {
-      current_conn.client_id = argv[++i];
-      has_connection = true;
-    } else if ((strcmp(argv[i], "--seq") == 0) && i + 1 < argc) {
-      try {
-        current_conn.starting_seq_num = std::stoull(argv[++i]);
-        has_connection = true;
-      } catch (...) {
-        fprintf(stderr, "Error: Invalid sequence number: %s\n", argv[i]);
-        return 1;
-      }
-    } else if ((strcmp(argv[i], "--workers") == 0) && i + 1 < argc) {
-      try {
-        config.worker_thread_count = static_cast<size_t>(std::stoi(argv[++i]));
-      } catch (...) {
-        fprintf(stderr, "Error: Invalid worker count: %s\n", argv[i]);
-        return 1;
-      }
-    } else if ((strcmp(argv[i], "--raw-queue") == 0) && i + 1 < argc) {
-      try {
-        config.raw_queue_size = static_cast<size_t>(std::stoi(argv[++i]));
-      } catch (...) {
-        fprintf(stderr, "Error: Invalid queue size: %s\n", argv[i]);
-        return 1;
-      }
-    } else if ((strcmp(argv[i], "--dec-queue") == 0) && i + 1 < argc) {
-      try {
-        config.decoded_queue_size = static_cast<size_t>(std::stoi(argv[++i]));
-      } catch (...) {
-        fprintf(stderr, "Error: Invalid queue size: %s\n", argv[i]);
-        return 1;
-      }
-    } else if ((strcmp(argv[i], "--reconnect") == 0) && i + 1 < argc) {
-      try {
-        config.reconnect_interval_ms = std::stoi(argv[++i]);
-      } catch (...) {
-        fprintf(stderr, "Error: Invalid reconnect interval: %s\n", argv[i]);
-        return 1;
-      }
-    } else if ((strcmp(argv[i], "--queue-timeout") == 0) && i + 1 < argc) {
-      try {
-        config.queue_push_timeout_ms = std::stoi(argv[++i]);
-      } catch (...) {
-        fprintf(stderr, "Error: Invalid queue timeout: %s\n", argv[i]);
-        return 1;
-      }
-    } else if ((strcmp(argv[i], "--stats-interval") == 0) && i + 1 < argc) {
-      try {
-        stats_interval_sec = std::stoi(argv[++i]);
-      } catch (...) {
-        fprintf(stderr, "Error: Invalid stats interval: %s\n", argv[i]);
-        return 1;
-      }
-    } else if ((strcmp(argv[i], "--pool-stats-interval") == 0) && i + 1 < argc) {
-      try {
-        pool_stats_interval_sec = std::stoi(argv[++i]);
-        if (pool_stats_interval_sec < 0) {
-          fprintf(stderr, "Error: Pool stats interval must be >= 0\n");
-          return 1;
-        }
-      } catch (...) {
-        fprintf(stderr, "Error: Invalid pool stats interval: %s\n", argv[i]);
-        return 1;
-      }
-    } else if ((strcmp(argv[i], "--log-dir") == 0) && i + 1 < argc) {
-      log_dir = argv[++i];
-    } else if ((strcmp(argv[i], "--log-stdout") == 0) && i + 1 < argc) {
-      try {
-        log_stdout = std::stoi(argv[++i]);
-      } catch (...) {
-        fprintf(stderr, "Error: Invalid log stdout level: %s\n", argv[i]);
-        return 1;
-      }
-    } else if ((strcmp(argv[i], "--log-file") == 0) && i + 1 < argc) {
-      try {
-        log_file = std::stoi(argv[++i]);
-      } catch (...) {
-        fprintf(stderr, "Error: Invalid log file level: %s\n", argv[i]);
-        return 1;
-      }
-    } else if ((strcmp(argv[i], "--log-syslog") == 0) && i + 1 < argc) {
-      try {
-        log_syslog = std::stoi(argv[++i]);
-      } catch (...) {
-        fprintf(stderr, "Error: Invalid log syslog level: %s\n", argv[i]);
-        return 1;
-      }
-    } else if (strcmp(argv[i], "--aggregation") == 0) {
-      config.aggregation_config.enabled = true;
-    } else if ((strcmp(argv[i], "--agg-window") == 0) && i + 1 < argc) {
-      try {
-        config.aggregation_config.window_ms = std::stoull(argv[++i]);
-        config.aggregation_config.enabled = true;  // Enable if window specified
-      } catch (...) {
-        fprintf(stderr, "Error: Invalid aggregation window: %s\n", argv[i]);
-        return 1;
-      }
-    } else if ((strcmp(argv[i], "--agg-format") == 0) && i + 1 < argc) {
-      std::string fmt = argv[++i];
-      if (fmt == "csv" || fmt == "CSV") {
-        config.aggregation_config.output_format = metrics::OutputFormat::CSV;
-      } else {
-        config.aggregation_config.output_format = metrics::OutputFormat::INFLUXDB_LINE;
-      }
-    } else if ((strcmp(argv[i], "--agg-output") == 0) && i + 1 < argc) {
-      config.aggregation_config.output_dir = argv[++i];
-    } else if ((strcmp(argv[i], "--agg-prefix") == 0) && i + 1 < argc) {
-      config.aggregation_config.filename_prefix = argv[++i];
     } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
       printUsage(argv[0]);
       return 0;
+    } else if (strncmp(argv[i], "--host", 6) == 0 ||
+               strncmp(argv[i], "--port", 6) == 0 ||
+               strncmp(argv[i], "--failover", 10) == 0 ||
+               strcmp(argv[i], "--item") == 0 ||
+               strcmp(argv[i], "--client-id") == 0 ||
+               strcmp(argv[i], "--seq") == 0) {
+      if (!parseConnectionOption(argc, argv, i, current_conn, config, has_connection)) {
+        return 1;
+      }
+    } else if (strncmp(argv[i], "--agg", 5) == 0) {
+      if (!parseAggregationOption(argc, argv, i, config)) {
+        return 1;
+      }
     } else {
-      fprintf(stderr, "Unknown option: %s\n", argv[i]);
-      printUsage(argv[0]);
-      return 1;
+      if (!parseGlobalOption(argc, argv, i, config,
+                             stats_interval_sec, pool_stats_interval_sec,
+                             log_dir, log_stdout, log_file, log_syslog)) {
+        return 1;
+      }
+      // If parseGlobalOption didn't consume anything, it was an unknown option.
+      // We detect this by checking if 'i' was unchanged (but our helpers always
+      // consume at least the current arg).  Actually, parseGlobalOption only
+      // handles known globals; unknown options fall through silently.
+      // To catch unknowns, we verify the option was actually handled.
+      // Simpler: check if it's a known global prefix.
+      bool is_known_global =
+          strncmp(argv[i], "--workers", 9) == 0 ||
+          strncmp(argv[i], "--raw-queue", 11) == 0 ||
+          strncmp(argv[i], "--dec-queue", 11) == 0 ||
+          strncmp(argv[i], "--reconnect", 11) == 0 ||
+          strncmp(argv[i], "--queue-timeout", 15) == 0 ||
+          strncmp(argv[i], "--stats-interval", 16) == 0 ||
+          strncmp(argv[i], "--pool-stats", 12) == 0 ||
+          strncmp(argv[i], "--log", 5) == 0;
+      if (!is_known_global) {
+        fprintf(stderr, "Unknown option: %s\n", argv[i]);
+        printUsage(argv[0]);
+        return 1;
+      }
     }
   }
 

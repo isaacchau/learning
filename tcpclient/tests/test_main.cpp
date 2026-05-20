@@ -950,6 +950,524 @@ TEST(config_parser_aggregation) {
     return true;
 }
 
+// ----------------------------------------------------------------------------
+// RawMessage / SubMessage Edge Case Tests
+// ----------------------------------------------------------------------------
+// Tests for empty messages, max-size messages, and boundary conditions.
+// ----------------------------------------------------------------------------
+
+TEST(protocol_empty_tcp_response) {
+    // TcpResponse with zero length (edge case - no payload)
+    TcpResponse resp;
+    resp.respLen = 0;
+    resp.respSeq = 0;
+    ASSERT_EQ(0, resp.respLen);
+    ASSERT_EQ(0, resp.respSeq);
+    return true;
+}
+
+TEST(protocol_max_tcp_response_seq) {
+    // Maximum sequence number in TcpResponse
+    TcpResponse resp;
+    resp.respLen = static_cast<uint16_t>(MIN_MSG_LEN);
+    resp.respSeq = UINT64_MAX;
+    ASSERT_EQ(UINT64_MAX, resp.respSeq);
+    ASSERT_EQ(MIN_MSG_LEN, resp.respLen);
+    return true;
+}
+
+TEST(protocol_msg_hdr_zero_timestamp) {
+    // MsgHdr with zero timestamp (epoch)
+    MsgHdr hdr;
+    hdr.msgSeqNum = 1;
+    hdr.timestamp = 0;
+    hdr.flags = 0;
+    ASSERT_EQ(1, hdr.msgSeqNum);
+    ASSERT_EQ(0, hdr.timestamp);
+    ASSERT_EQ(0, hdr.flags);
+    return true;
+}
+
+TEST(protocol_max_msg_hdr_seq) {
+    // MsgHdr with max sequence number
+    MsgHdr hdr;
+    hdr.msgSeqNum = UINT64_MAX;
+    hdr.timestamp = UINT32_MAX;
+    hdr.flags = UINT16_MAX;
+    ASSERT_EQ(UINT64_MAX, hdr.msgSeqNum);
+    ASSERT_EQ(UINT32_MAX, hdr.timestamp);
+    ASSERT_EQ(UINT16_MAX, hdr.flags);
+    return true;
+}
+
+TEST(protocol_max_size_message_body) {
+    // Simulate a maximum-size message body
+    // MAX_MSG_LEN = 65535 (envelope + header + body)
+    // Body = MAX_MSG_LEN - sizeof(TcpResponse) - sizeof(MsgHdr) = 65535 - 24 = 65511
+    size_t max_body = MAX_MSG_LEN - MIN_MSG_LEN;
+    ASSERT_EQ(65511, max_body);
+
+    MemoryPool pool;
+    auto buf = pool.allocate(max_body);
+    ASSERT_TRUE(buf != nullptr);
+    ASSERT_TRUE(buf->capacity >= max_body);
+
+    // Fill entire body area
+    std::memset(buf->data, 0xAB, max_body);
+    ASSERT_EQ(static_cast<char>(0xAB), buf->data[0]);
+    ASSERT_EQ(static_cast<char>(0xAB), buf->data[max_body - 1]);
+    return true;
+}
+
+TEST(protocol_min_size_message) {
+    // Minimum message: TcpResponse + MsgHdr, zero body
+    size_t total = sizeof(TcpResponse) + sizeof(MsgHdr);
+    ASSERT_EQ(24, total);
+    ASSERT_EQ(MIN_MSG_LEN, total);
+
+    MemoryPool pool;
+    auto buf = pool.allocate(total);
+    ASSERT_TRUE(buf != nullptr);
+
+    // Simulate wire layout
+    TcpResponse* resp = reinterpret_cast<TcpResponse*>(buf->data);
+    resp->respLen = static_cast<uint16_t>(total);
+    resp->respSeq = 42;
+
+    MsgHdr* hdr = reinterpret_cast<MsgHdr*>(buf->data + sizeof(TcpResponse));
+    hdr->msgSeqNum = 100;
+    hdr->timestamp = 1234567890;
+    hdr->flags = 0x01;
+
+    ASSERT_EQ(42, resp->respSeq);
+    ASSERT_EQ(100, hdr->msgSeqNum);
+    ASSERT_EQ(1234567890, hdr->timestamp);
+    return true;
+}
+
+TEST(protocol_sub_message_max_body_pointer) {
+    // SubMessage with body pointer at end of buffer
+    MemoryPool pool;
+    auto buf = pool.allocate(1024);
+    ASSERT_TRUE(buf != nullptr);
+
+    SubMessage sub;
+    sub.buffer = buf;
+    sub.seq_num = 1;
+    sub.timestamp = 0;
+    sub.flags = 0;
+    sub.body = buf->data + 1020;  // Near end of buffer
+    sub.body_length = 4;           // Fits exactly
+    sub.connection_id = 0;
+
+    ASSERT_EQ(4, sub.length());
+    ASSERT_EQ(buf->data + 1020, sub.data());
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// Connection / SocketGuard Edge Case Tests
+// ----------------------------------------------------------------------------
+// Tests for SocketGuard RAII behavior and connection edge cases.
+// ----------------------------------------------------------------------------
+
+TEST(socket_guard_default_invalid) {
+    // Default-constructed SocketGuard should be invalid
+    SocketGuard sg;
+    ASSERT_FALSE(sg.valid());
+    ASSERT_EQ(-1, sg.get());
+    ASSERT_FALSE(static_cast<bool>(sg));
+    return true;
+}
+
+TEST(socket_guard_release) {
+    // Create with a dummy fd (we can't create real sockets in unit tests)
+    // Use -1 to represent invalid, and test release semantics
+    SocketGuard sg1;
+    ASSERT_EQ(-1, sg1.release());
+    ASSERT_FALSE(sg1.valid());
+    return true;
+}
+
+TEST(socket_guard_move) {
+    // Test move semantics with dummy fd values
+    // We can't create real sockets, but we can verify the move logic
+    // by constructing with a known fd value
+    int dummy_fd = 99;  // Just a number, won't actually close anything
+    SocketGuard sg1(dummy_fd);
+    ASSERT_TRUE(sg1.valid());
+    ASSERT_EQ(dummy_fd, sg1.get());
+
+    SocketGuard sg2(std::move(sg1));
+    ASSERT_FALSE(sg1.valid());  // moved-from should be invalid
+    ASSERT_TRUE(sg2.valid());
+    ASSERT_EQ(dummy_fd, sg2.get());
+
+    // sg2 destructor will try to close(99) - that's fine, it's a no-op or harmless
+    return true;
+}
+
+TEST(socket_guard_reset) {
+    SocketGuard sg1(100);
+    ASSERT_TRUE(sg1.valid());
+    sg1.reset(200);
+    ASSERT_TRUE(sg1.valid());
+    ASSERT_EQ(200, sg1.get());
+    sg1.reset();
+    ASSERT_FALSE(sg1.valid());
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// Memory Pool Edge Case Tests
+// ----------------------------------------------------------------------------
+
+TEST(pool_stats_consistency) {
+    // Verify that pool stats are consistent after allocations and returns
+    std::vector<SizeClassConfig> limited_config = {
+        {64, 2, 4, 4},
+        {256, 2, 4, 4},
+        {1024, 2, 4, 4},
+        {4096, 2, 4, 4},
+        {16384, 2, 4, 4},
+        {65536, 2, 4, 4},
+        {131072, 2, 4, 4},
+        {262144, 2, 4, 4}
+    };
+    MemoryPool pool(limited_config);
+
+    // Allocate some buffers
+    auto buf1 = pool.allocate(64);
+    auto buf2 = pool.allocate(64);
+    auto buf3 = pool.allocate(256);
+
+    ASSERT_TRUE(buf1 != nullptr);
+    ASSERT_TRUE(buf2 != nullptr);
+    ASSERT_TRUE(buf3 != nullptr);
+
+    auto stats = pool.getStats();
+    ASSERT_EQ(8, stats.size());
+
+    // Class 0 (64B): 2 allocated
+    ASSERT_EQ(2, stats[0].current_allocated);
+    // Class 1 (256B): 1 allocated
+    ASSERT_EQ(1, stats[1].current_allocated);
+
+    // Return buffers
+    buf1.reset();
+    buf2.reset();
+    buf3.reset();
+
+    stats = pool.getStats();
+    ASSERT_EQ(0, stats[0].current_allocated);
+    ASSERT_EQ(0, stats[1].current_allocated);
+    // total_returned should reflect the returns
+    ASSERT_EQ(2, stats[0].total_returned);
+    ASSERT_EQ(1, stats[1].total_returned);
+
+    return true;
+}
+
+TEST(pool_multiple_allocations_same_size) {
+    // Allocate and return many buffers of the same size
+    MemoryPool pool;
+    std::vector<std::shared_ptr<Buffer>> buffers;
+
+    for (int i = 0; i < 100; ++i) {
+        auto buf = pool.allocate(256);
+        ASSERT_TRUE(buf != nullptr);
+        buf->data[0] = static_cast<char>(i);
+        buffers.push_back(buf);
+    }
+
+    // Verify all buffers are valid and have distinct data
+    for (int i = 0; i < 100; ++i) {
+        ASSERT_EQ(static_cast<char>(i), buffers[i]->data[0]);
+    }
+
+    // Free half
+    for (int i = 0; i < 50; ++i) {
+        buffers[i].reset();
+    }
+
+    // Reallocate - should reuse from pool
+    for (int i = 0; i < 50; ++i) {
+        auto buf = pool.allocate(256);
+        ASSERT_TRUE(buf != nullptr);
+        // Should be zeroed (security feature)
+        ASSERT_EQ(0, buf->data[0]);
+    }
+
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// Config Parser Edge Case Tests
+// ----------------------------------------------------------------------------
+
+TEST(config_parser_empty_file) {
+    const char* tmpfile = "/tmp/test_config_empty_file.json";
+    FILE* f = std::fopen(tmpfile, "w");
+    ASSERT_TRUE(f != nullptr);
+    std::fclose(f);  // Empty file
+
+    MsgClientConfig config;
+    std::string error;
+    bool result = parseConfigFile(tmpfile, config, error);
+
+    ASSERT_FALSE(result);
+    ASSERT_TRUE(!error.empty());
+
+    std::remove(tmpfile);
+    return true;
+}
+
+TEST(config_parser_null_fields) {
+    const char* tmpfile = "/tmp/test_config_null.json";
+    FILE* f = std::fopen(tmpfile, "w");
+    ASSERT_TRUE(f != nullptr);
+    std::fprintf(f, "{\n");
+    std::fprintf(f, "  \"connections\": [{\"host\":null,\"port\":8888,\"item\":\"x\",\"client_id\":\"c\"}]\n");
+    std::fprintf(f, "}\n");
+    std::fclose(f);
+
+    MsgClientConfig config;
+    std::string error;
+    bool result = parseConfigFile(tmpfile, config, error);
+
+    ASSERT_FALSE(result);
+    ASSERT_TRUE(!error.empty());
+
+    std::remove(tmpfile);
+    return true;
+}
+
+TEST(config_parser_negative_port) {
+    const char* tmpfile = "/tmp/test_config_neg_port.json";
+    FILE* f = std::fopen(tmpfile, "w");
+    ASSERT_TRUE(f != nullptr);
+    std::fprintf(f, "{\n");
+    std::fprintf(f, "  \"connections\": [{\"host\":\"127.0.0.1\",\"port\":-1,\"item\":\"x\",\"client_id\":\"c\"}]\n");
+    std::fprintf(f, "}\n");
+    std::fclose(f);
+
+    MsgClientConfig config;
+    std::string error;
+    bool result = parseConfigFile(tmpfile, config, error);
+
+    ASSERT_FALSE(result);
+    ASSERT_TRUE(!error.empty());
+
+    std::remove(tmpfile);
+    return true;
+}
+
+TEST(config_parser_zero_workers) {
+    const char* tmpfile = "/tmp/test_config_zero_workers.json";
+    FILE* f = std::fopen(tmpfile, "w");
+    ASSERT_TRUE(f != nullptr);
+    std::fprintf(f, "{\n");
+    std::fprintf(f, "  \"global\": {\"workers\": 0},\n");
+    std::fprintf(f, "  \"connections\": [{\"host\":\"127.0.0.1\",\"port\":8888,\"item\":\"x\",\"client_id\":\"c\"}]\n");
+    std::fprintf(f, "}\n");
+    std::fclose(f);
+
+    MsgClientConfig config;
+    std::string error;
+    bool result = parseConfigFile(tmpfile, config, error);
+
+    ASSERT_FALSE(result);
+    ASSERT_TRUE(!error.empty());
+
+    std::remove(tmpfile);
+    return true;
+}
+
+TEST(config_parser_too_many_connections) {
+    const char* tmpfile = "/tmp/test_config_too_many.json";
+    FILE* f = std::fopen(tmpfile, "w");
+    ASSERT_TRUE(f != nullptr);
+    std::fprintf(f, "{\"connections\": [\n");
+    for (int i = 0; i < 65; ++i) {
+        std::fprintf(f, "  {\"host\":\"127.0.0.1\",\"port\":%d,\"item\":\"item%d\",\"client_id\":\"c%d\"}",
+                     8000 + i, i, i);
+        if (i < 64) std::fprintf(f, ",");
+        std::fprintf(f, "\n");
+    }
+    std::fprintf(f, "]}\n");
+    std::fclose(f);
+
+    MsgClientConfig config;
+    std::string error;
+    bool result = parseConfigFile(tmpfile, config, error);
+
+    ASSERT_FALSE(result);
+    ASSERT_TRUE(!error.empty());
+
+    std::remove(tmpfile);
+    return true;
+}
+
+TEST(config_parser_long_item_name) {
+    const char* tmpfile = "/tmp/test_config_long_item.json";
+    FILE* f = std::fopen(tmpfile, "w");
+    ASSERT_TRUE(f != nullptr);
+    std::fprintf(f, "{\n");
+    std::fprintf(f, "  \"connections\": [{\"host\":\"127.0.0.1\",\"port\":8888,\"item\":\"this_is_a_very_long_item_name_that_exceeds_32_chars\",\"client_id\":\"c\"}]\n");
+    std::fprintf(f, "}\n");
+    std::fclose(f);
+
+    MsgClientConfig config;
+    std::string error;
+    bool result = parseConfigFile(tmpfile, config, error);
+
+    ASSERT_FALSE(result);
+    ASSERT_TRUE(!error.empty());
+
+    std::remove(tmpfile);
+    return true;
+}
+
+TEST(config_parser_long_client_id) {
+    const char* tmpfile = "/tmp/test_config_long_id.json";
+    FILE* f = std::fopen(tmpfile, "w");
+    ASSERT_TRUE(f != nullptr);
+    std::fprintf(f, "{\n");
+    std::fprintf(f, "  \"connections\": [{\"host\":\"127.0.0.1\",\"port\":8888,\"item\":\"x\",\"client_id\":\"this_is_a_very_long_client_id_that_exceeds_32_chars\"}]\n");
+    std::fprintf(f, "}\n");
+    std::fclose(f);
+
+    MsgClientConfig config;
+    std::string error;
+    bool result = parseConfigFile(tmpfile, config, error);
+
+    ASSERT_FALSE(result);
+    ASSERT_TRUE(!error.empty());
+
+    std::remove(tmpfile);
+    return true;
+}
+
+TEST(config_parser_default_values) {
+    // Config with only required fields - should use defaults for everything else
+    const char* tmpfile = "/tmp/test_config_defaults.json";
+    FILE* f = std::fopen(tmpfile, "w");
+    ASSERT_TRUE(f != nullptr);
+    std::fprintf(f, "{\"connections\": [{\"host\":\"127.0.0.1\",\"port\":8888,\"item\":\"x\",\"client_id\":\"c\"}]}\n");
+    std::fclose(f);
+
+    MsgClientConfig config;
+    std::string error;
+    bool result = parseConfigFile(tmpfile, config, error);
+
+    ASSERT_TRUE(result);
+    ASSERT_EQ(Defaults::WORKER_THREAD_COUNT, config.worker_thread_count);
+    ASSERT_EQ(Defaults::RAW_QUEUE_SIZE, config.raw_queue_size);
+    ASSERT_EQ(Defaults::DECODED_QUEUE_SIZE, config.decoded_queue_size);
+    ASSERT_EQ(Defaults::RECONNECT_INTERVAL_MS, config.reconnect_interval_ms);
+    ASSERT_EQ(Defaults::QUEUE_PUSH_TIMEOUT_MS, config.queue_push_timeout_ms);
+
+    std::remove(tmpfile);
+    return true;
+}
+
+TEST(config_parser_invalid_pool_class_index) {
+    // Pool config with invalid class index (class_8 doesn't exist)
+    const char* tmpfile = "/tmp/test_config_pool_bad.json";
+    FILE* f = std::fopen(tmpfile, "w");
+    ASSERT_TRUE(f != nullptr);
+    std::fprintf(f, "{\n");
+    std::fprintf(f, "  \"connections\": [{\"host\":\"127.0.0.1\",\"port\":8888,\"item\":\"x\",\"client_id\":\"c\"}],\n");
+    std::fprintf(f, "  \"memory_pool\": {\"class_8\": {\"initial\": 10}}\n");
+    std::fprintf(f, "}\n");
+    std::fclose(f);
+
+    MsgClientConfig config;
+    std::string error;
+    bool result = parseConfigFile(tmpfile, config, error);
+
+    // class_8 is silently ignored (only class_0..7 are processed)
+    // but the config should still parse successfully with defaults
+    ASSERT_TRUE(result);
+    ASSERT_EQ(8, config.pool_config.size());
+
+    std::remove(tmpfile);
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// LockFreeRingBuffer Edge Case Tests
+// ----------------------------------------------------------------------------
+
+TEST(ringbuffer_pop_empty) {
+    LockFreeRingBuffer<int> rb(4);
+    int val = 999;
+    ASSERT_FALSE(rb.pop(val));
+    ASSERT_EQ(999, val);  // val should be unchanged
+    return true;
+}
+
+TEST(ringbuffer_push_full) {
+    LockFreeRingBuffer<int> rb(2);
+    ASSERT_TRUE(rb.push(1));
+    ASSERT_TRUE(rb.push(2));
+    ASSERT_FALSE(rb.push(3));  // Full
+    ASSERT_EQ(2, rb.size());
+    return true;
+}
+
+TEST(ringbuffer_size_overflow_wrap) {
+    // Test that size() works correctly across wraparound
+    LockFreeRingBuffer<int> rb(4);
+    int val;
+
+    // Fill, empty, fill again
+    ASSERT_TRUE(rb.push(1));
+    ASSERT_TRUE(rb.push(2));
+    ASSERT_EQ(2, rb.size());
+    ASSERT_TRUE(rb.pop(val));
+    ASSERT_TRUE(rb.pop(val));
+    ASSERT_EQ(0, rb.size());
+
+    ASSERT_TRUE(rb.push(3));
+    ASSERT_TRUE(rb.push(4));
+    ASSERT_TRUE(rb.push(5));
+    ASSERT_EQ(3, rb.size());
+    ASSERT_TRUE(rb.pop(val)); ASSERT_EQ(3, val);
+    ASSERT_TRUE(rb.pop(val)); ASSERT_EQ(4, val);
+    ASSERT_TRUE(rb.pop(val)); ASSERT_EQ(5, val);
+
+    return true;
+}
+
+TEST(ringbuffer_move_only_type) {
+    // Test with a move-only type to ensure push(T&&) works
+    struct MoveOnly {
+        int value;
+        MoveOnly() : value(0) {}
+        MoveOnly(int v) : value(v) {}
+        MoveOnly(MoveOnly&& other) : value(other.value) { other.value = -1; }
+        MoveOnly& operator=(MoveOnly&& other) {
+            value = other.value;
+            other.value = -1;
+            return *this;
+        }
+        MoveOnly(const MoveOnly&) = delete;
+        MoveOnly& operator=(const MoveOnly&) = delete;
+    };
+
+    LockFreeRingBuffer<MoveOnly> rb(4);
+    MoveOnly item(42);
+    ASSERT_TRUE(rb.push(std::move(item)));
+    ASSERT_EQ(-1, item.value);  // moved-from
+
+    MoveOnly popped(0);
+    ASSERT_TRUE(rb.pop(popped));
+    ASSERT_EQ(42, popped.value);
+
+    return true;
+}
+
 // ============================================================================
 // Main Test Runner
 // ============================================================================
