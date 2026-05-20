@@ -5,6 +5,13 @@
 // worker threads), connection management with epoll, and reconnection logic.
 //
 // See msg_client.h for the public API and doc/03_Architecture.md for design.
+//
+// Key implementation choices:
+//   - All socket operations (connect, recv, close) are confined to the IO thread.
+//     This eliminates the need for socket-level locking.
+//   - The decoder thread is the ONLY parser of the wire format.  Moving parsing
+//     out of the IO thread means a malformed message cannot stall recv().
+//   - Worker threads never block each other because each has a private SPSC queue.
 // ============================================================================
 
 #include "msg_client.h"
@@ -415,6 +422,17 @@ bool MsgClient::isRunning() const {
 // ============================================================================
 // Connection Helpers
 // ============================================================================
+// resolveEndpoint / resolveHost:
+//   DNS resolution is done once at startup (in start()) and cached in
+//   ConnectionState::resolved_endpoints.  This avoids blocking getaddrinfo
+//   calls inside the hot IO loop.  If resolution fails at startup, the IO
+//   loop will retry resolution on each reconnection attempt.
+//
+// connectToServer:
+//   Creates a new socket, applies TCP options (keepalive, NODELAY, buffer
+//   sizes), and connects to the currently active endpoint.  On failure,
+//   handleConnectFailure() updates backoff state and may trigger failover.
+// ============================================================================
 
 bool MsgClient::resolveEndpoint(size_t conn_idx, size_t ep_idx) {
     if (conn_idx >= connections_.size()) return false;
@@ -466,6 +484,17 @@ bool MsgClient::resolveHost(size_t conn_idx) {
 // ============================================================================
 // These helpers configure a newly-created socket before connect().
 // Extracted from connectToServer() to reduce its length and nesting.
+//
+// Rationale for each option:
+//   - SO_KEEPALIVE + TCP_KEEPIDLE/INTVL/CNT: detect dead peers quickly
+//     (default 10s idle, 3s interval, 3 probes = ~19s to detect failure).
+//   - SO_SNDTIMEO: prevents connect() from hanging indefinitely on a
+//     black-holed host (5-second upper bound).
+//   - TCP_NODELAY: disables Nagle's algorithm.  We send small subscription
+//     requests and want low latency; buffering would add unnecessary delay.
+//   - SO_RCVBUF: larger receive buffers reduce the chance of kernel drops
+//     under high throughput.  We log the actual value because the kernel
+//     may double the requested size.
 // ============================================================================
 
 static void applyKeepalive(int fd, size_t conn_idx, int tcp_keepidle, int tcp_keepintvl, int tcp_keepcnt) {
@@ -706,6 +735,11 @@ void MsgClient::handleConnectFailure(size_t conn_idx, const char* reason) {
 //     cannot represent a sub-range of an array without extra bookkeeping.
 //   - Copying the small tail (usually < one message) is cheaper than the
 //     complexity of multi-message buffer management.
+//
+// Why no idle-timeout disconnect?
+//   Market data can legitimately be quiet for extended periods
+//   (overnight, holidays, pre-open). Forcing a reconnect would
+//   be counter-productive — TCP keepalive handles dead peers.
 // ============================================================================
 
 void MsgClient::ioLoop() {
@@ -951,6 +985,8 @@ void MsgClient::ioLoop() {
 // Round-robin load balancing:
 //   - Simple modulo distribution ensures even spreading across workers.
 //   - No need for work-stealing because all messages are independent.
+//   - If a worker queue is full, the message is dropped (protects decoder
+//     from stalling behind a slow worker).
 // ============================================================================
 
 void MsgClient::decoderLoop() {
@@ -1017,6 +1053,11 @@ void MsgClient::decoderLoop() {
 //   - The user-supplied handler_ is called for EVERY message, even when
 //     aggregation is enabled.  This gives the user full control.
 //   - handler_ receives (SubMessage, worker_index, connection_id).
+//
+// Buffer lifetime:
+//   - msg.buffer is reset at the end of the loop iteration.  If the user's
+//     handler captured a copy of the shared_ptr, the buffer stays alive
+//     until the last reference is released (true zero-copy).
 // ============================================================================
 
 void MsgClient::workerLoop(size_t worker_index) {
@@ -1131,6 +1172,9 @@ void MsgClient::workerLoop(size_t worker_index) {
         // Release buffer reference
         // Explicit reset() here documents the hand-off: the buffer may still be
         // alive if the user's handler captured a copy of msg.buffer.
+        // The shared_ptr custom deleter will return the buffer to the pool
+        // (or destroy it if the pool's free list is full) once the refcount
+        // drops to zero.
         msg.buffer.reset();
     }
 }

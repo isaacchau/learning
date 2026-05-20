@@ -11,6 +11,13 @@
 //
 // All inter-thread communication uses single-producer-single-consumer
 // lock-free ring buffers (LockFreeRingBuffer) to avoid mutex contention.
+//
+// Design rationale for the three-stage pipeline:
+//   - Separating I/O from parsing keeps the epoll loop tight and responsive.
+//   - Separating parsing from business logic prevents a slow handler from
+//     stalling the network read loop (which would cause TCP backpressure).
+//   - Lock-free queues between stages eliminate kernel futex overhead,
+//     which is critical for sub-microsecond message latency.
 // ============================================================================
 
 #ifndef MSG_CLIENT_H
@@ -112,6 +119,12 @@ private:
 //   - raw_queue_size is shared across ALL connections (single SPSC).
 //   - decoded_queue_size is PER WORKER (each worker has its own SPSC).
 //   - Both are rounded up to the next power of 2 internally.
+//
+// Why these specific defaults?
+//   - 16384 entries per queue balances memory (~128KB for pointers) against
+//     burst absorption. At 70k msg/s, this gives ~230ms of buffering.
+//   - 2 worker threads is the minimum to demonstrate parallelism without
+//     overwhelming a typical 4-core development machine.
 // ============================================================================
 
 // Default configuration values
@@ -295,6 +308,11 @@ struct ResolvedEndpoint {
 // Why unique_ptr<ConnectionState>?
 //   ConnectionState is non-copyable/non-movable (contains atomic members).
 //   unique_ptr lets us store it in a standard container.
+//
+// Why track last_received_seq_ per connection?
+//   On reconnect, the subscription request includes this sequence number
+//   so the server can resume streaming from where we left off.  This
+//   avoids gaps and duplicates in the message stream.
 // ============================================================================
 
 struct ConnectionState {
@@ -468,7 +486,9 @@ private:
     // User-supplied callback invoked by each worker for every decoded message
     MessageHandler handler_;
 
-    // Control flag — set to false in stop() to signal all threads to exit
+    // Control flag — set to false in stop() to signal all threads to exit.
+    // Uses memory_order_seq_cst in stop() to ensure all prior writes are
+    // visible to threads before they observe running_ == false.
     std::atomic<bool> running_;
 
     // Global statistics (relaxed atomic counters)
@@ -477,8 +497,9 @@ private:
     // Epoll instance for efficient multi-connection I/O (Linux only)
     std::atomic<int> epoll_fd_;
 
-    // Cached environment-derived constants (read once at construction)
+    // Cached environment-derived constants (read once at construction).
     // Reading getenv on every connect() would be racy and slow; cache them here.
+    // These values are immutable after construction (no atomic needed).
     size_t recv_buffer_size_ = 0;
     int    tcp_keepidle_ = 0;
     int    tcp_keepintvl_ = 0;

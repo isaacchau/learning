@@ -4,6 +4,12 @@
 // Parses command-line arguments and environment variables, loads optional
 // JSON configuration, sets up signal handling, and runs the MsgClient.
 //
+// Configuration hierarchy (highest to lowest precedence):
+//   1. Command-line arguments
+//   2. Environment variables (APP_TCP_CLIENT_*, APP_LOG_*)
+//   3. JSON configuration file (--config <file>)
+//   4. Hardcoded defaults in msg_client.h
+//
 // See doc/05_Build_and_Run.md for usage examples.
 // ============================================================================
 

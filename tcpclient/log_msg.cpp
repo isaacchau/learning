@@ -3,6 +3,14 @@
 // ============================================================================
 // Implements the LogMsg singleton with stdout, file, and syslog backends.
 // See log_msg.h for the public API and convenience macros.
+//
+// Design notes:
+//   - Uses a background thread to batch-write log entries, keeping the
+//     hot-path (LOG_INFO, LOG_ERR) non-blocking for the caller.
+//   - A bounded MPSC ring buffer (8192 entries) absorbs bursts.  If the
+//     buffer fills, new entries are dropped and a warning is emitted.
+//   - Thread IDs are cached in thread_local storage to avoid a syscall
+//     on every log call.
 // ============================================================================
 
 #include "log_msg.h"

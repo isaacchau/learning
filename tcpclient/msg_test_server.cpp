@@ -1,13 +1,22 @@
-// msg_test_server.cpp
-// Test server that generates configurable messages for the MsgClient.
-// Usage: ./msg_test_server [--port P] [--msg-size S] [--msg-rate R]
-// [--msg-count N]
+// ============================================================================
+// msg_test_server.cpp — Interactive test server for MsgClient
+// ============================================================================
+// Generates configurable TCP message streams with dynamic rate controls.
+// Used for development, integration testing, and throughput benchmarking.
+//
+// Usage: ./msg_test_server [--port P] [--msg-size S] [--msg-rate R] [--msg-count N]
 //
 // Interactive controls (while client connected):
 //   'u' - Increase send rate by 10%
 //   'd' - Decrease send rate by 10%
 //   'o' - Reset to original rate
 //   'q' - Quit server
+//
+// Wire protocol:
+//   - Expects a TcpRequest (76 bytes) on connect.
+//   - Responds with a stream of TcpResponse + MsgHdr + body messages.
+//   - Sequence numbers are monotonically increasing per connection.
+// ============================================================================
 
 #include "log_msg.h"
 #include "protocol.h"

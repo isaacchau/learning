@@ -8,16 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Comprehensive file-header comments to all core headers (`msg_client.h`, `protocol.h`, `lockfree_ringbuffer.h`, `shared_ptr_pool.h`, `log_msg.h`, `config_parser.h`).
-- Inline documentation in `msg_client.cpp` explaining:
-  - IO thread message-framing logic and why trailing bytes are copied.
-  - Decoder thread zero-copy design and round-robin load balancing.
-  - Worker thread aggregation pipeline and handler invocation contract.
-  - TCP socket options (keepalive, Nagle, send timeout) and their rationale.
-- `CHANGELOG.md` to track project evolution.
+- Enhanced inline documentation in `msg_client.h`:
+  - Design rationale for the three-stage pipeline (why separate I/O, decoder, workers).
+  - Queue default sizing notes (16384 entries ≈ 230ms burst absorption at 70k msg/s).
+  - Explanation of per-connection sequence tracking for resume-on-reconnect.
+  - Memory ordering notes for `running_` control flag.
+- Enhanced inline documentation in `msg_client.cpp`:
+  - Connection helper rationale (DNS resolution caching, failover).
+  - Socket option rationale (keepalive timing, NODELAY, SO_RCVBUF kernel doubling).
+  - IO loop: explanation of why no idle-timeout disconnect is used.
+  - Decoder loop: note on drop behavior when worker queues are full.
+  - Worker loop: buffer lifetime documentation and custom deleter behavior.
+- Enhanced file headers for `main.cpp`, `log_msg.cpp`, `config_parser.cpp`,
+  `msg_test_server.cpp`, `metrics.hpp`, and `metrics_demo.cpp` with usage
+  hints and design overviews.
+- Added "Source File Guide" table to `doc/README.md` mapping each source file
+  to its responsibility.
 
 ### Changed
-- `doc/README.md`: removed duplicate `08_Memory_Tuning.md` entry in the index table.
+- `doc/README.md`: added Source File Guide table for quick navigation.
 
 ### Fixed
 - Minor trailing-whitespace cleanup in `msg_client.h`.

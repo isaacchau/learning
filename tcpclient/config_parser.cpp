@@ -4,6 +4,13 @@
 // Wraps nlohmann/json (vendored single-header json.hpp) to load
 // MsgClientConfig from a JSON file.  See doc/05_Build_and_Run.md
 // for the JSON schema and examples.
+//
+// Validation strategy:
+//   - Structural validation (types, required fields) happens during parsing.
+//   - Semantic validation (ranges, consistency) happens in validateConfig()
+//     after the full config object is built.
+//   - This two-pass approach gives better error messages: we can report
+//     the exact JSON path that failed, not just a generic "invalid config".
 // ============================================================================
 
 #include "config_parser.h"

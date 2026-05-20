@@ -3,6 +3,13 @@
 // ============================================================================
 // Provides Value, TagSet, Datapoint, Shard, and Aggregator classes for
 // collecting and flushing time-bucketed metrics to CSV or InfluxDB format.
+//
+// Design overview:
+//   - Metrics are sharded by hash of tags to reduce lock contention.
+//   - Each shard maintains a map of (metric_name → Value) for the current
+//     time bucket.  When the bucket expires, the shard is swapped and
+//     flushed asynchronously by a DiskWriter thread.
+//   - The 'add' operation is cumulative (counters); 'set' overwrites (gauges).
 // ============================================================================
 
 #ifndef METRICS_HPP

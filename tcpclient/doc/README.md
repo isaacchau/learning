@@ -21,6 +21,23 @@ Welcome! This documentation is designed for developers who haven't used C++ in a
 | [07_Analysis_Tools.md](07_Analysis_Tools.md) | Static analysis, sanitizers, debugging tools |
 | [08_Memory_Tuning.md](08_Memory_Tuning.md) | Memory usage estimation, tuning, and optimization |
 
+## Source File Guide
+
+| File | Responsibility |
+|------|----------------|
+| `msg_client.h` / `msg_client.cpp` | Core client class, connection management, three-stage thread lifecycle, statistics |
+| `main.cpp` | CLI parsing, environment-variable overrides, JSON config loading, signal handling, stats printing loop |
+| `msg_test_server.cpp` | Interactive test server with keyboard rate controls (`u`/`d`/`o`/`q`) |
+| `config_parser.h` / `config_parser.cpp` | JSON configuration file parsing using `json.hpp` |
+| `protocol.h` | Packed wire-format structs (`TcpRequest`, `TcpResponse`, `MsgHdr`) and internal pipeline types (`RawMessage`, `SubMessage`) |
+| `lockfree_ringbuffer.h` | Templated SPSC lock-free ring buffer with progressive spin-backoff |
+| `shared_ptr_pool.h` | Size-class memory pool (`MemoryPool`) and `Buffer` with custom `shared_ptr` deleters |
+| `log_msg.h` / `log_msg.cpp` | Singleton logger with syslog-compatible levels and convenience macros (`LOG_INFO`, `LOG_ERR`, etc.) |
+| `metrics.hpp` / `metrics_demo.cpp` | Time-bucketed metrics aggregation library with CSV and InfluxDB Line output |
+| `market_data/message_types.h` | Market data message structs (orders, trades, quotes) for the aggregation pipeline |
+| `tests/test_main.cpp` | Custom minimal unit-test framework and test cases |
+| `json.hpp` | Vendored single-header JSON library (nlohmann/json) |
+
 ## For the Impatient
 
 ```bash
