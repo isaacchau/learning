@@ -1,3 +1,12 @@
+// ============================================================================
+// main.cpp — CLI entry point for msg_client
+// ============================================================================
+// Parses command-line arguments and environment variables, loads optional
+// JSON configuration, sets up signal handling, and runs the MsgClient.
+//
+// See doc/05_Build_and_Run.md for usage examples.
+// ============================================================================
+
 #include "log_msg.h"
 #include "msg_client.h"
 #include "config_parser.h"

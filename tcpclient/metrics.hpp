@@ -1,3 +1,10 @@
+// ============================================================================
+// metrics.hpp — Multi-threaded metrics aggregation library
+// ============================================================================
+// Provides Value, TagSet, Datapoint, Shard, and Aggregator classes for
+// collecting and flushing time-bucketed metrics to CSV or InfluxDB format.
+// ============================================================================
+
 #ifndef METRICS_HPP
 #define METRICS_HPP
 
@@ -743,11 +750,9 @@ private:
 
     void executeFlush(uint64_t cutoff) {
         std::vector<Datapoint> all_datapoints;
-        size_t estimated = 0;
         for (auto& shard : shards_) {
             std::lock_guard<std::mutex> lock(shard->mutex());
             auto extracted = shard->extract(cutoff, clear_on_flush_);
-            estimated += extracted.size();
             all_datapoints.insert(all_datapoints.end(),
                                   std::make_move_iterator(extracted.begin()),
                                   std::make_move_iterator(extracted.end()));
@@ -764,7 +769,7 @@ private:
 
         // Get flush time for filename
         auto now = std::chrono::system_clock::now();
-        auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        auto flush_ts_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
             now.time_since_epoch()).count();
 
         // Format off-lock
@@ -781,7 +786,7 @@ private:
         // Generate filename
         uint64_t seq = flush_sequence_.fetch_add(1, std::memory_order_relaxed);
         std::string filename = Formatter::generateFilename(
-            output_dir_, file_prefix_, measurement_, ext, now_ns, seq);
+            output_dir_, file_prefix_, measurement_, ext, flush_ts_ns, seq);
 
         // Enqueue to disk writer
         DiskWriterTask task;

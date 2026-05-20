@@ -1,9 +1,17 @@
+// ============================================================================
+// msg_client.cpp — Core MsgClient implementation
+// ============================================================================
+// Implements the three-stage lock-free pipeline (IO thread, decoder thread,
+// worker threads), connection management with epoll, and reconnection logic.
+//
+// See msg_client.h for the public API and doc/03_Architecture.md for design.
+// ============================================================================
+
 #include "msg_client.h"
 #include "log_msg.h"
 #include "market_data/message_types.h"
 
 #include <cstdlib>
-#include <string>
 #include <string>
 
 #include <sys/socket.h>

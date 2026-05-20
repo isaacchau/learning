@@ -1,3 +1,10 @@
+// ============================================================================
+// market_data/message_types.h — Market data message type definitions
+// ============================================================================
+// Defines the message type enumeration, base header, and concrete message
+// structs used by the market data aggregation pipeline.
+// ============================================================================
+
 #ifndef MESSAGE_TYPES_H
 #define MESSAGE_TYPES_H
 

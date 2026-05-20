@@ -1,3 +1,10 @@
+// ============================================================================
+// metrics_demo.cpp — Multi-threaded metrics aggregation demo
+// ============================================================================
+// Demonstrates the metrics library with rotating file output in both
+// CSV and InfluxDB line-protocol formats.
+// ============================================================================
+
 #include "metrics.hpp"
 
 #include <cassert>

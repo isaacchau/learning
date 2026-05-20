@@ -1,3 +1,11 @@
+// ============================================================================
+// config_parser.cpp — JSON configuration file parser implementation
+// ============================================================================
+// Wraps nlohmann/json (vendored single-header json.hpp) to load
+// MsgClientConfig from a JSON file.  See doc/05_Build_and_Run.md
+// for the JSON schema and examples.
+// ============================================================================
+
 #include "config_parser.h"
 #include "json.hpp"
 #include "log_msg.h"

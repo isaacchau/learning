@@ -1,3 +1,10 @@
+// ============================================================================
+// log_msg.cpp — Thread-safe singleton logger implementation
+// ============================================================================
+// Implements the LogMsg singleton with stdout, file, and syslog backends.
+// See log_msg.h for the public API and convenience macros.
+// ============================================================================
+
 #include "log_msg.h"
 
 #include <cstdio>
