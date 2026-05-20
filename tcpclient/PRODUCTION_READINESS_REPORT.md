@@ -1,8 +1,8 @@
 # Consolidated Production Readiness Report
 
 **Supersedes:** `tmp_code_audit_report.md`, `tcpclient_audit_report.md` (previous versions)  
-**Date:** 2026-05-12  
-**Codebase:** `tcpclient` @ commit `4d434ce`
+**Date:** 2026-05-20  
+**Codebase:** `tcpclient` @ commit `2c81e44` (branch `feature/hermes-agent-demo`)
 
 ---
 
@@ -62,14 +62,34 @@ This consolidated report reflects the **current HEAD** and only lists remaining,
 
 | Check | Result |
 |-------|--------|
-| Release build (`make`) | ✅ Passes |
-| Unit tests (`make test`) | ✅ **15 / 15 passing** |
-| Compiler warnings | ⚠️ **1 minor warning**: unused variable `stats_last_seq` in `msg_test_server.cpp:388` |
+| Release build (`make clean && make`) | ✅ Passes (clean, no warnings) |
+| Debug build (`make debug`) | ✅ Passes |
+| Unit tests (`make test`) | ✅ **65 / 65 passing** |
+| AddressSanitizer tests (`test_runner_asan`) | ✅ **65 / 65 passing** — no leaks, no overflows |
+| UndefinedBehaviorSanitizer tests (`test_runner_ubsan`) | ✅ **65 / 65 passing** — no UB detected |
+| ThreadSanitizer tests (`test_runner_tsan`) | ⚠️ **Runtime environment incompatibility** — TSan fails with "unexpected memory mapping" (known issue on some Linux kernels with ASLR; not a code bug) |
+| Static analysis (`make check` / `cppcheck`) | ⚠️ **No new issues** — only pre-existing style suggestions (useStlAlgorithm, constParameter) and false-positives in vendored `json.hpp` and test code |
+| clang-tidy (`make -f Makefile.analysis tidy`) | ⚠️ **2 warnings** — see "Known clang-tidy Findings" below |
+| Compiler warnings | ✅ **Clean** (-Wall -Wextra) |
 | `Makefile.analysis` | ✅ Correct (`config_parser.cpp` present) |
 
 ---
 
 ## Remaining Issues (Current HEAD)
+
+### Known clang-tidy Findings
+
+#### 1. Move-after-use in decoderLoop (false positive)
+- **Location:** `msg_client.cpp:1038`
+- **Warning:** `Method called on moved-from object 'buffer'`
+- **Analysis:** This is a **false positive**. The code reads `raw.buffer->data + raw.offset` at line 1038, then moves `raw.buffer` into `sub.buffer` at line 1049. The `msg_data` pointer is captured before the move and is valid because the underlying `Buffer` object (managed by the `shared_ptr`) is not destroyed — its reference count is merely transferred. The clang-analyzer path assumes a second loop iteration reuses the moved-from `raw.buffer`, but `raw` is overwritten by `pop_wait()` on the next iteration.
+- **Action:** No fix needed. The code is correct.
+
+#### 2. Uninitialized va_list in log_msg (false positive)
+- **Location:** `log_msg.cpp:156`
+- **Warning:** `Function 'vsnprintf' is called with an uninitialized va_list argument`
+- **Analysis:** This is a **false positive** in the `log()` overload that takes `va_list ap`. The public entry points (`LogMsg::log()` and `LogMsg::log_to()`) always call `va_start()` before passing `args` to `pimpl_->log()`. The analyzer path traces through the `running` check and assumes the `ap` parameter path is reachable without initialization, but all call sites initialize it.
+- **Action:** No fix needed. All call sites properly initialize the va_list.
 
 ### Minor
 
@@ -78,6 +98,7 @@ This consolidated report reflects the **current HEAD** and only lists remaining,
 - **Issue:** `uint64_t stats_last_seq = seq;` is never read.
 - **Impact:** Build noise; no runtime effect.
 - **Fix:** Remove the variable.
+- **Status:** ✅ **Fixed** in commit `ebc5441`.
 
 ### Medium (Portability / Future Hardening)
 
@@ -121,9 +142,10 @@ This consolidated report reflects the **current HEAD** and only lists remaining,
 
 ### Recommended (before wide deployment)
 1. Add `ntohs`/`ntohl` if there is any chance of big-endian peers.
-2. Run ThreadSanitizer in CI: `make -f Makefile.analysis tsan`
+2. Run ThreadSanitizer in CI: `make -f Makefile.analysis tsan` (note: may require disabling ASLR on some kernels).
 3. Set up log rotation for `./log`.
 4. Monitor `pool_misses` (via `--pool-stats-interval`) to ensure the memory pool is adequately sized.
+5. Consider addressing cppcheck `useStlAlgorithm` style suggestions in `metrics.hpp` and `main.cpp` for improved readability.
 
 ### Optional (future scaling)
 1. Replace per-size-class mutex with lock-free free lists for >100k msg/s workloads.
@@ -150,5 +172,5 @@ The codebase demonstrates:
 
 ---
 
-*Report generated: 2026-05-12*  
-*Codebase version: master (commit 4d434ce)*
+*Report generated: 2026-05-20*  
+*Codebase version: feature/hermes-agent-demo (commit 2c81e44)*
