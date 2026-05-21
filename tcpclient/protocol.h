@@ -101,6 +101,14 @@ inline size_t getRecvBufferSize() {
 
 // Raw message: produced by IO thread, consumed by decoder thread.
 // Holds a shared reference to the receive buffer.
+//
+// Why shared_ptr instead of a raw pointer + length?
+//   - The recv buffer may contain multiple messages.  Each RawMessage
+//     references the same underlying buffer at different offsets.
+//   - shared_ptr ensures the buffer stays alive until the LAST consumer
+//     (decoder or worker) finishes with it.  Without this, a fast decoder
+//     could free the buffer while a slow worker still reads from it.
+//   - The custom deleter returns the buffer to MemoryPool for reuse.
 struct RawMessage {
   std::shared_ptr<Buffer> buffer; // Shared reference to recv buffer
   size_t offset;                  // Start of this message within buffer->data
@@ -113,6 +121,13 @@ struct RawMessage {
 
 // Decoded sub-message: produced by decoder thread, consumed by worker threads.
 // Holds a shared reference to the original buffer (zero-copy).
+//
+// Why does SubMessage also hold a shared_ptr?
+//   - The decoder moves the shared_ptr from RawMessage to SubMessage.
+//     This is a single atomic refcount bump (or none, if moved).
+//   - Workers may outlive the decoder's processing of the next message,
+//     so the buffer must remain pinned until ALL workers are done.
+//   - Zero-copy: no message body bytes are copied between stages.
 struct SubMessage {
   std::shared_ptr<Buffer> buffer; // Keeps underlying buffer alive
   uint64_t seq_num;               // From MsgHdr.msgSeqNum

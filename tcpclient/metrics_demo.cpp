@@ -7,6 +7,12 @@
 //
 // Build: g++ -std=c++14 metrics_demo.cpp -o metrics_demo -lpthread
 // Run:   ./metrics_demo
+//
+// Why a standalone demo?
+//   - It exercises the metrics library without needing a running msg_client
+//     or test server.  Useful for CI validation of output formats.
+//   - It generates synthetic data with known distributions, making it easy
+//     to verify aggregation correctness by hand.
 // ============================================================================
 
 #include "metrics.hpp"

@@ -10,6 +10,13 @@
 //   3. JSON configuration file (--config <file>)
 //   4. Hardcoded defaults in msg_client.h
 //
+// Why this precedence order?
+//   - CLI args are most explicit (user typed them right now).
+//   - Environment variables allow container/orchestrator overrides without
+//     changing command lines.
+//   - JSON config files are version-controlled and shared across environments.
+//   - Defaults are the safety net.
+//
 // See doc/05_Build_and_Run.md for usage examples.
 // ============================================================================
 

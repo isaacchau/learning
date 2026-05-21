@@ -118,10 +118,16 @@ public:
   MemoryPool(const MemoryPool &) = delete;
   MemoryPool &operator=(const MemoryPool &) = delete;
 
-  // Allocate a buffer with at least `requested_size` bytes of data capacity.
-  // Returns shared_ptr with custom deleter that returns buffer to pool.
-  // Returns empty shared_ptr if allocation limit reached.
-  std::shared_ptr<Buffer> allocate(size_t requested_size) {
+    // Allocate a buffer with at least `requested_size` bytes of data capacity.
+    // Returns shared_ptr with custom deleter that returns buffer to pool.
+    // Returns empty shared_ptr if allocation limit reached.
+    //
+    // Why two-phase allocation (check free list under lock, then OS alloc outside)?
+    //   - Holding the mutex during ::new (which may call malloc) would extend
+    //     the critical section and block other threads.
+    //   - By doing OS allocation outside the lock, we minimize lock hold time
+    //     to a few atomic ops and vector pops.
+    std::shared_ptr<Buffer> allocate(size_t requested_size) {
     size_t cls = findSizeClass(requested_size);
     Buffer *buf = nullptr;
     bool need_os_alloc = false;
@@ -198,8 +204,11 @@ private:
 
   SizeClass classes_[NUM_SIZE_CLASSES];
 
-  // Find the smallest size class >= requested_size
-  size_t findSizeClass(size_t requested_size) const {
+    // Find the smallest size class >= requested_size.
+    // Linear scan is used because NUM_SIZE_CLASSES is only 8.
+    // A binary search would save ~2 comparisons but add branch misprediction
+    // overhead; the linear scan is predictable and cache-friendly.
+    size_t findSizeClass(size_t requested_size) const {
     for (size_t i = 0; i < NUM_SIZE_CLASSES; ++i) {
       if (classes_[i].block_size >= requested_size) {
         return i;

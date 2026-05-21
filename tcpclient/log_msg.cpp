@@ -11,6 +11,8 @@
 //     buffer fills, new entries are dropped and a warning is emitted.
 //   - Thread IDs are cached in thread_local storage to avoid a syscall
 //     on every log call.
+//   - Why MPSC instead of SPSC?  Multiple threads (IO, decoder, workers)
+//     may all log simultaneously.  The background thread is the sole consumer.
 // ============================================================================
 
 #include "log_msg.h"

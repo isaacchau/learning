@@ -1,3 +1,22 @@
+# ============================================================================
+# Makefile — Build system for msg_client and msg_test_server
+# ============================================================================
+# GNU Make build (no CMake). Supports release, debug, test, and demo targets.
+#
+# Why GNU Make instead of CMake?
+#   - This is a small, self-contained project with few source files.
+#   - Make is universally available on Linux build machines.
+#   - No external dependencies to discover or configure.
+#
+# Key targets:
+#   make        — Release build (O3 + LTO)
+#   make debug  — Debug build (O0 + g + DEBUG)
+#   make test   — Compile and run unit tests
+#   make demo   — Build metrics_demo standalone
+#   make check  — Run cppcheck static analysis
+#   make format — Run clang-format on all source files
+# ============================================================================
+
 CXX      = g++
 
 # Base and Release flags

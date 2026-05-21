@@ -16,6 +16,12 @@
 //   - Expects a TcpRequest (76 bytes) on connect.
 //   - Responds with a stream of TcpResponse + MsgHdr + body messages.
 //   - Sequence numbers are monotonically increasing per connection.
+//
+// Why a custom test server instead of netcat/nc?
+//   - netcat cannot generate structured binary messages with correct headers.
+//   - This server supports dynamic rate adjustment for stress testing.
+//   - It validates the subscription request (magic key, item name).
+//   - Sequence numbers and timestamps are generated correctly.
 // ============================================================================
 
 #include "log_msg.h"

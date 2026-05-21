@@ -11,6 +11,11 @@
 //     after the full config object is built.
 //   - This two-pass approach gives better error messages: we can report
 //     the exact JSON path that failed, not just a generic "invalid config".
+//
+// Why nlohmann/json?
+//   - Single-header, no build-system integration needed.
+//   - Modern C++ API (operator[], .get<T>()) that maps naturally to our structs.
+//   - Widely used, well-tested, and MIT licensed.
 // ============================================================================
 
 #include "config_parser.h"

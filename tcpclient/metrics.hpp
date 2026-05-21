@@ -10,6 +10,12 @@
 //     time bucket.  When the bucket expires, the shard is swapped and
 //     flushed asynchronously by a DiskWriter thread.
 //   - The 'add' operation is cumulative (counters); 'set' overwrites (gauges).
+//
+// Why sharding?
+//   - With a single mutex, high-throughput workers would serialize on the
+//     aggregator lock.  Sharding spreads contention across N independent locks.
+//   - The hash of tags determines the shard, so the same tag set always
+//     hits the same shard (preserving ordering / accumulation correctness).
 // ============================================================================
 
 #ifndef METRICS_HPP

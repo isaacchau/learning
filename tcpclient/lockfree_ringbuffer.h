@@ -127,6 +127,10 @@ public:
     }
 
     size_t size() const {
+        // Acquire on both head and tail ensures we see a consistent snapshot.
+        // Note: this is NOT an exact size under concurrent access (by design:
+        // the producer may advance head after we read it), but it is safe
+        // for diagnostics and the empty()/full() predicates.
         const size_t head = head_.load(std::memory_order_acquire);
         const size_t tail = tail_.load(std::memory_order_acquire);
         return head - tail;
@@ -138,6 +142,9 @@ public:
 
 private:
     static size_t nextPowerOf2(size_t n) {
+        // Classic bit-twiddling hack: set all lower bits to 1, then add 1.
+        // This runs in constant time (no loops) and is faster than looping
+        // or calling log2 for the small integers we deal with (queue sizes).
         if (n == 0) return 1;
         if ((n & (n - 1)) == 0) return n; // already power of 2
         --n;

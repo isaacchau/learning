@@ -69,6 +69,8 @@ public:
     SocketGuard& operator=(SocketGuard&& other) noexcept {
         if (this != &other) {
             close();
+            // relaxed is safe here: we are the sole owner after release()
+            // and close() already exchanged fd_ to -1 atomically.
             fd_.store(other.release(), std::memory_order_relaxed);
         }
         return *this;
@@ -391,6 +393,17 @@ struct StatsSnapshot {
 
 // ============================================================================
 // Message handler signature: (message, worker_thread_index, connection_id)
+// ============================================================================
+// Why include worker_index?
+//   - Allows the handler to maintain per-worker state (e.g., thread-local
+//     aggregation buffers) without synchronization.
+//   - Useful for debugging: knowing which worker processed a message helps
+//     trace load-balancing issues.
+//
+// Why include connection_id?
+//   - A single client may subscribe to multiple items across connections.
+//   - The handler needs to know which connection a message arrived on to
+//     route it to the correct downstream consumer or log source.
 // ============================================================================
 
 using MessageHandler = std::function<void(const SubMessage& msg, size_t worker_index, size_t connection_id)>;

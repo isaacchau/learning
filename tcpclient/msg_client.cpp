@@ -337,33 +337,38 @@ void MsgClient::stop() {
     if (!running_.load()) return;
     running_.store(false);
 
-    // Close all sockets to unblock any blocking recv/poll
+    // Close all sockets to unblock any blocking recv/poll.
+    // shutdown(SHUT_RDWR) causes epoll_wait to return EPOLLHUP,
+    // which breaks the IO thread out of its blocking call.
     closeAllSockets();
 
-    // Close epoll_fd to wake up epoll_wait immediately (it will return EBADF)
+    // Close epoll_fd to wake up epoll_wait immediately (it will return EBADF).
+    // We must join the IO thread BEFORE closing the fd to avoid a TSAN-reported
+    // race between epoll_wait (reading fd) and close (invalidating fd).
+    // In practice the race is benign (epoll_wait returns EBADF), but joining
+    // first keeps sanitizers happy and is formally correct.
     int epoll_fd_local = epoll_fd_.exchange(-1);
     if (epoll_fd_local >= 0) {
-        // TSAN reports a race because epoll_wait reads the fd
-        // while main thread calls close().  This is a benign race
-        // in practice: epoll_wait either succeeds (fd still open)
-        // or returns EBADF (fd closed).  Both are handled.
-        // We avoid atomic_thread_fence (not supported under TSAN)
-        // and instead rely on closeAllSockets() above to unblock
-        // epoll via EPOLLHUP before we close the epoll fd.
-        //
-        // To fully silence TSAN we join the IO thread first, then close.
-        // The IO thread will observe epoll_fd_ == -1 and exit its loop.
         if (io_thread_.joinable()) {
             io_thread_.join();
         }
         ::close(epoll_fd_local);
     } else {
-        // Join threads in pipeline order (producers → consumers) so workers
-        // finish processing everything already in the queues.
         if (io_thread_.joinable()) {
             io_thread_.join();
         }
     }
+
+    // Join order: IO → decoder → workers (producer-to-consumer).
+    //
+    // Why this order?
+    //   - The IO thread produces RawMessages; if we joined workers first,
+    //     they would exit while the decoder still has work, leaving decoded
+    //     messages stranded in decoded_queues_ (memory leak of shared_ptrs).
+    //   - Joining decoder before workers ensures all messages are pushed
+    //     to worker queues before workers exit.
+    //   - Joining workers last guarantees every message that entered the
+    //     pipeline is either processed or explicitly dropped.
     if (decoder_thread_.joinable()) {
         decoder_thread_.join();
     }
@@ -786,6 +791,13 @@ bool MsgClient::tryActivateConnection(size_t conn_idx) {
 
 // Compute epoll timeout so we wake up when the next disconnected connection
 // is due for retry, but don't exceed POLL_TIMEOUT_MS.
+//
+// Why a dynamic timeout instead of a fixed one?
+//   - A fixed timeout (e.g., 100ms) means we might sleep past a connection's
+//     retry deadline, adding unnecessary latency to reconnection.
+//   - A dynamic timeout lets epoll_wait return exactly when the next retry
+//     is due, keeping reconnections as prompt as possible while still
+//     capping the sleep to avoid infinite blocking.
 int MsgClient::computeEpollTimeoutMs(
     const std::vector<bool>& connected,
     const std::chrono::steady_clock::time_point& now) const {
@@ -850,6 +862,21 @@ size_t MsgClient::parseMessagesFromBuffer(
 
 // Receive data from a connection and parse messages.
 // Returns false if the connection should be closed.
+//
+// Buffer management strategy:
+//   - Each connection has one active recv buffer.  Data is appended at
+//     recv_used; complete messages are extracted and the remaining bytes
+//     (partial message tail) are copied to a NEW buffer.
+//   - Why copy the tail instead of sliding data within the same buffer?
+//     Because RawMessage holds a shared_ptr to the entire buffer, not a
+//     sub-range.  Once a RawMessage is pushed to raw_queue_, that buffer
+//     must remain immutable until all consumers release it.  Copying the
+//     small tail (usually < one message) is cheaper than the complexity
+//     of reference-counted sub-buffer ranges.
+//   - If the buffer fills with no complete message, we discard it and
+//     allocate a fresh one.  This handles pathological cases where the
+//     peer sends data faster than we can parse (shouldn't happen with
+//     valid protocol, but protects against malicious streams).
 bool MsgClient::processRecvData(
     size_t conn_idx, char* buf_data, size_t& buf_used,
     size_t buf_capacity, std::shared_ptr<Buffer>& buf_ref) {
@@ -971,6 +998,9 @@ void MsgClient::ioLoop() {
 
             bool should_close = false;
 
+            // Check error/hangup BEFORE read so we don't recv() on a dead socket.
+            // EPOLLERR can arrive with EPOLLIN; processing ERR first avoids
+            // reading garbage from a socket that has already failed.
             if (events[event_idx].events & (EPOLLERR | EPOLLHUP)) {
                 should_close = true;
             }
@@ -983,6 +1013,8 @@ void MsgClient::ioLoop() {
                 }
             }
 
+            // EPOLLRDHUP means the peer shutdown its write side (half-close).
+            // We won't receive more data, so close our side too.
             if (events[event_idx].events & EPOLLRDHUP) {
                 should_close = true;
             }

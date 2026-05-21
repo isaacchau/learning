@@ -1,5 +1,5 @@
 // ============================================================================
-// Unit Test Framework
+// tests/test_main.cpp — Custom minimal unit-test framework and test cases
 // ============================================================================
 // This is a minimal test framework. No external dependencies needed!
 // 
@@ -15,6 +15,12 @@
 // 2. Refactoring safety - tests verify changes don't break things
 // 3. Documentation - tests show how code is supposed to work
 // 4. Regression prevention - once a bug is fixed, a test ensures it stays fixed
+//
+// WHY A CUSTOM FRAMEWORK INSTEAD OF GTEST/CATCH2?
+//   - Zero external dependencies: just g++ and this file.
+//   - No package manager, no submodule, no CMake find_package.
+//   - Tests compile in < 5 seconds on a modest machine.
+//   - For a project of this size, the overhead of GTest outweighs its benefits.
 //
 // HOW TO RUN:
 // -----------

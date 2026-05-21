@@ -37,6 +37,8 @@ Welcome! This documentation is designed for developers who haven't used C++ in a
 | `market_data/message_types.h` | Market data message structs (orders, trades, quotes) for the aggregation pipeline |
 | `tests/test_main.cpp` | Custom minimal unit-test framework and test cases |
 | `json.hpp` | Vendored single-header JSON library (nlohmann/json) |
+| `Makefile` | GNU Make build system: release, debug, test, demo, format, check targets |
+| `Makefile.analysis` | Static and dynamic analysis targets: ASan, TSan, UBSan, clang-tidy, Valgrind |
 
 ## For the Impatient
 

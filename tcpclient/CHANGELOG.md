@@ -13,20 +13,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Queue default sizing notes (16384 entries ≈ 230ms burst absorption at 70k msg/s).
   - Explanation of per-connection sequence tracking for resume-on-reconnect.
   - Memory ordering notes for `running_` control flag.
+  - WHY comments on `MessageHandler` signature (worker_index, connection_id).
+  - WHY comment on `SocketGuard` move-assignment memory ordering.
 - Enhanced inline documentation in `msg_client.cpp`:
   - Connection helper rationale (DNS resolution caching, failover).
   - Socket option rationale (keepalive timing, NODELAY, SO_RCVBUF kernel doubling).
   - IO loop: explanation of why no idle-timeout disconnect is used.
+  - IO loop: WHY comments on epoll event ordering (ERR before IN, RDHUP handling).
+  - `computeEpollTimeoutMs`: WHY dynamic timeout beats fixed polling.
+  - `processRecvData`: buffer rotation strategy and tail-copy rationale.
+  - `stop()`: detailed producer-to-consumer thread join ordering rationale.
   - Decoder loop: note on drop behavior when worker queues are full.
   - Worker loop: buffer lifetime documentation and custom deleter behavior.
+- Enhanced inline documentation in `lockfree_ringbuffer.h`:
+  - WHY `size()` uses acquire ordering and its concurrency semantics.
+  - WHY `nextPowerOf2()` uses bit-twiddling instead of loops/log2.
+- Enhanced inline documentation in `shared_ptr_pool.h`:
+  - WHY linear scan in `findSizeClass()` (small fixed array, branch prediction).
+  - WHY two-phase allocation (lock-free-list check, then OS alloc outside lock).
+- Enhanced inline documentation in `protocol.h`:
+  - WHY `RawMessage` and `SubMessage` use `shared_ptr` (zero-copy, buffer lifetime).
+- Enhanced inline documentation in `market_data/message_types.h`:
+  - WHY fixed-size char arrays instead of `std::string` (zero-copy, deterministic layout).
+  - Security note on non-null-terminated char arrays.
 - Enhanced file headers for `main.cpp`, `log_msg.cpp`, `config_parser.cpp`,
-  `msg_test_server.cpp`, `metrics.hpp`, and `metrics_demo.cpp` with usage
-  hints and design overviews.
+  `msg_test_server.cpp`, `metrics.hpp`, `metrics_demo.cpp`, and `tests/test_main.cpp`
+  with additional WHY comments and design overviews.
+- Added file header to `Makefile` explaining WHY GNU Make is used.
 - Added "Source File Guide" table to `doc/README.md` mapping each source file
-  to its responsibility.
+  to its responsibility (now includes `Makefile` and `Makefile.analysis`).
 
 ### Changed
 - `doc/README.md`: added Source File Guide table for quick navigation.
+- `tests/test_main.cpp`: updated header title to match file path.
 
 ### Fixed
 - Minor trailing-whitespace cleanup in `msg_client.h`.

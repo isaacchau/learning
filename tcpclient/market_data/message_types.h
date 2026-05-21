@@ -3,6 +3,26 @@
 // ============================================================================
 // Defines the message type enumeration, base header, and concrete message
 // structs used by the market data aggregation pipeline.
+//
+// Design rationale:
+//   - All messages share a common MsgHeader for uniform parsing.
+//   - Fixed-size char arrays (not std::string) ensure predictable layout
+//     and avoid heap allocations in the hot path.
+//   - Padding fields explicitly align structs to 8-byte boundaries for
+//     efficient memory access on x86_64.
+//   - Each message type has a static TYPE constant for compile-time dispatch.
+//
+// Why fixed-size arrays instead of std::string?
+//   - std::string uses heap storage (SSO aside), which causes allocation
+//     overhead and non-deterministic memory layout.
+//   - Fixed arrays allow the decoder to cast raw bytes directly to structs
+//     (reinterpret_cast) without copying — critical for zero-copy design.
+//
+// Security note:
+//   - Char arrays are NOT null-terminated by the wire format.  getMarket(),
+//     getInstrument(), etc. return raw pointers; callers must use strnlen
+//     or known lengths when converting to std::string.
+// ============================================================================
 // ============================================================================
 
 #ifndef MESSAGE_TYPES_H
