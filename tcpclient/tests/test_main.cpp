@@ -732,6 +732,7 @@ TEST(ringbuffer_push_pop_mixed) {
 // ----------------------------------------------------------------------------
 
 #include "../config_parser.h"
+#include "../log_msg.h"
 #include <cstdio>
 
 TEST(config_parser_valid_file) {
@@ -1471,6 +1472,588 @@ TEST(ringbuffer_move_only_type) {
     ASSERT_TRUE(rb.pop(popped));
     ASSERT_EQ(42, popped.value);
 
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// LogMsg Tests
+// ----------------------------------------------------------------------------
+// These test the singleton logger initialization and basic behavior.
+// ----------------------------------------------------------------------------
+
+TEST(log_msg_init_shutdown) {
+    // Basic init/shutdown cycle should not crash
+    LogMsg::getInstance().init("test_runner", "/tmp/test_logs");
+    LOG_INFO("Test log message %d", 42);
+    LogMsg::getInstance().shutdown();
+    return true;
+}
+
+TEST(log_msg_levels) {
+    // Verify that log levels are ordered correctly
+    ASSERT_TRUE(LOG_LEVEL_CRIT < LOG_LEVEL_ERR);
+    ASSERT_TRUE(LOG_LEVEL_ERR < LOG_LEVEL_WARN);
+    ASSERT_TRUE(LOG_LEVEL_WARN < LOG_LEVEL_NOTICE);
+    ASSERT_TRUE(LOG_LEVEL_NOTICE < LOG_LEVEL_INFO);
+    ASSERT_TRUE(LOG_LEVEL_INFO < LOG_LEVEL_DEBUG);
+    return true;
+}
+
+TEST(log_msg_channels) {
+    // Verify channel bitmask values
+    ASSERT_EQ(1, CH_STDOUT);
+    ASSERT_EQ(2, CH_FILE);
+    ASSERT_EQ(4, CH_SYSLOG);
+    ASSERT_EQ(7, CH_ALL);
+    ASSERT_EQ(3, CH_STDOUT | CH_FILE);
+    ASSERT_EQ(5, CH_STDOUT | CH_SYSLOG);
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// MsgClientConfig Validation Tests
+// ----------------------------------------------------------------------------
+// These test the programmatic configuration validation.
+// ----------------------------------------------------------------------------
+
+TEST(config_validate_empty_connections) {
+    MsgClientConfig config;
+    // Default config has no connections
+    std::string err = config.validate();
+    ASSERT_TRUE(!err.empty());
+    return true;
+}
+
+TEST(config_validate_valid_minimal) {
+    MsgClientConfig config;
+    config.addConnection("127.0.0.1", 8888, "test_item");
+    std::string err = config.validate();
+    ASSERT_TRUE(err.empty());
+    return true;
+}
+
+TEST(config_validate_too_many_workers) {
+    MsgClientConfig config;
+    config.addConnection("127.0.0.1", 8888, "test_item");
+    config.worker_thread_count = 100;
+    std::string err = config.validate();
+    ASSERT_TRUE(!err.empty());
+    return true;
+}
+
+TEST(config_validate_zero_workers) {
+    MsgClientConfig config;
+    config.addConnection("127.0.0.1", 8888, "test_item");
+    config.worker_thread_count = 0;
+    std::string err = config.validate();
+    ASSERT_TRUE(!err.empty());
+    return true;
+}
+
+TEST(config_validate_queue_size_too_small) {
+    MsgClientConfig config;
+    config.addConnection("127.0.0.1", 8888, "test_item");
+    config.raw_queue_size = 32;  // Below MIN_QUEUE_SIZE (64)
+    std::string err = config.validate();
+    ASSERT_TRUE(!err.empty());
+    return true;
+}
+
+TEST(config_validate_queue_size_too_large) {
+    MsgClientConfig config;
+    config.addConnection("127.0.0.1", 8888, "test_item");
+    config.raw_queue_size = 2000000;  // Above MAX_QUEUE_SIZE (1048576)
+    std::string err = config.validate();
+    ASSERT_TRUE(!err.empty());
+    return true;
+}
+
+TEST(config_validate_reconnect_interval_out_of_range) {
+    MsgClientConfig config;
+    config.addConnection("127.0.0.1", 8888, "test_item");
+    config.reconnect_interval_ms = 50;  // Below MIN_RECONNECT_MS (100)
+    std::string err = config.validate();
+    ASSERT_TRUE(!err.empty());
+    return true;
+}
+
+TEST(config_validate_invalid_endpoint_port) {
+    MsgClientConfig config;
+    ConnectionConfig conn;
+    conn.endpoints.push_back({"127.0.0.1", 0});  // Port 0 is invalid
+    conn.item_name = "test";
+    conn.client_id = "client";
+    config.connections.push_back(conn);
+    std::string err = config.validate();
+    ASSERT_TRUE(!err.empty());
+    return true;
+}
+
+TEST(config_validate_empty_item_name) {
+    MsgClientConfig config;
+    ConnectionConfig conn;
+    conn.endpoints.push_back({"127.0.0.1", 8888});
+    conn.item_name = "";
+    conn.client_id = "client";
+    config.connections.push_back(conn);
+    std::string err = config.validate();
+    ASSERT_TRUE(!err.empty());
+    return true;
+}
+
+TEST(config_validate_long_item_name) {
+    MsgClientConfig config;
+    ConnectionConfig conn;
+    conn.endpoints.push_back({"127.0.0.1", 8888});
+    conn.item_name = "this_is_a_very_long_item_name_that_exceeds_32_chars";
+    conn.client_id = "client";
+    config.connections.push_back(conn);
+    std::string err = config.validate();
+    ASSERT_TRUE(!err.empty());
+    return true;
+}
+
+TEST(config_validate_empty_client_id) {
+    MsgClientConfig config;
+    ConnectionConfig conn;
+    conn.endpoints.push_back({"127.0.0.1", 8888});
+    conn.item_name = "test";
+    conn.client_id = "";
+    config.connections.push_back(conn);
+    std::string err = config.validate();
+    ASSERT_TRUE(!err.empty());
+    return true;
+}
+
+TEST(config_validate_multiple_connections) {
+    MsgClientConfig config;
+    for (int i = 0; i < 5; ++i) {
+        config.addConnection("127.0.0.1", static_cast<uint16_t>(8000 + i), "item");
+    }
+    std::string err = config.validate();
+    ASSERT_TRUE(err.empty());
+    ASSERT_EQ(5, config.connections.size());
+    return true;
+}
+
+TEST(config_validate_max_connections_boundary) {
+    MsgClientConfig config;
+    for (int i = 0; i < 64; ++i) {
+        config.addConnection("127.0.0.1", static_cast<uint16_t>(8000 + i), "item");
+    }
+    std::string err = config.validate();
+    ASSERT_TRUE(err.empty());
+    ASSERT_EQ(64, config.connections.size());
+    return true;
+}
+
+TEST(config_validate_too_many_connections) {
+    MsgClientConfig config;
+    for (int i = 0; i < 65; ++i) {
+        config.addConnection("127.0.0.1", static_cast<uint16_t>(8000 + i), "item");
+    }
+    std::string err = config.validate();
+    ASSERT_TRUE(!err.empty());
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// ConnectionConfig Validation Tests
+// ----------------------------------------------------------------------------
+
+TEST(connection_config_validate_empty_endpoints) {
+    ConnectionConfig conn;
+    conn.item_name = "test";
+    conn.client_id = "client";
+    std::string err = conn.validate();
+    ASSERT_TRUE(!err.empty());
+    return true;
+}
+
+TEST(connection_config_validate_empty_host) {
+    ConnectionConfig conn;
+    conn.endpoints.push_back({"", 8888});
+    conn.item_name = "test";
+    conn.client_id = "client";
+    std::string err = conn.validate();
+    ASSERT_TRUE(!err.empty());
+    return true;
+}
+
+TEST(connection_config_validate_zero_retries) {
+    ConnectionConfig conn;
+    conn.endpoints.push_back({"127.0.0.1", 8888});
+    conn.item_name = "test";
+    conn.client_id = "client";
+    conn.max_retries_per_endpoint = 0;
+    std::string err = conn.validate();
+    ASSERT_TRUE(!err.empty());
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// Protocol Edge Case Tests — Connection / Wire Format
+// ----------------------------------------------------------------------------
+
+TEST(protocol_magic_key_env_override) {
+    // Save original env
+    const char* original = std::getenv("APP_TCP_MAGIC_KEY");
+    // Set custom magic key
+    setenv("APP_TCP_MAGIC_KEY", "0xDEADBEEF", 1);
+    // Force re-evaluation by calling getMagicKey (static init runs once per process)
+    // Since we can't easily reset static, we just verify the function exists
+    // and returns the default when env is not set (or the overridden value).
+    // This test is best-effort because static initialization is process-wide.
+    uint32_t key = getMagicKey();
+    // If env was set before process start, it may be overridden
+    // We restore and don't assert a specific value to avoid flakiness
+    if (original) {
+        setenv("APP_TCP_MAGIC_KEY", original, 1);
+    } else {
+        unsetenv("APP_TCP_MAGIC_KEY");
+    }
+    // Just verify the function returns a non-zero key
+    ASSERT_TRUE(key != 0);
+    return true;
+}
+
+TEST(protocol_recv_buffer_size_env) {
+    // Similar best-effort test for recv buffer size env override
+    const char* original = std::getenv("APP_TCP_RECV_BUFFER_SIZE");
+    setenv("APP_TCP_RECV_BUFFER_SIZE", "131072", 1);
+    size_t size = getRecvBufferSize();
+    if (original) {
+        setenv("APP_TCP_RECV_BUFFER_SIZE", original, 1);
+    } else {
+        unsetenv("APP_TCP_RECV_BUFFER_SIZE");
+    }
+    ASSERT_TRUE(size >= MIN_MSG_LEN);
+    return true;
+}
+
+TEST(protocol_tcp_request_wire_layout) {
+    // Verify that TcpRequest fields are at expected offsets (packed struct)
+    TcpRequest req;
+    std::memset(&req, 0, sizeof(req));
+    req.reqKey = 0x12345678;
+    // Check that reqItem starts immediately after reqKey (offset 4)
+    char* base = reinterpret_cast<char*>(&req);
+    uint32_t* key_ptr = reinterpret_cast<uint32_t*>(base + 0);
+    ASSERT_EQ(0x12345678, *key_ptr);
+    // reqItem at offset 4
+    char* item_ptr = base + 4;
+    std::memcpy(item_ptr, "ITEM", 4);
+    ASSERT_EQ('I', req.reqItem[0]);
+    // lastRespSeq at offset 36 (4 + 32)
+    uint64_t* seq_ptr = reinterpret_cast<uint64_t*>(base + 36);
+    *seq_ptr = 0xABCDEF01;
+    ASSERT_EQ(0xABCDEF01, req.lastRespSeq);
+    // clientID at offset 44 (36 + 8)
+    char* id_ptr = base + 44;
+    std::memcpy(id_ptr, "ID", 2);
+    ASSERT_EQ('I', req.clientID[0]);
+    return true;
+}
+
+TEST(protocol_tcp_response_wire_layout) {
+    // Verify TcpResponse packed layout
+    TcpResponse resp;
+    std::memset(&resp, 0, sizeof(resp));
+    char* base = reinterpret_cast<char*>(&resp);
+    uint16_t* len_ptr = reinterpret_cast<uint16_t*>(base + 0);
+    *len_ptr = 1234;
+    ASSERT_EQ(1234, resp.respLen);
+    uint64_t* seq_ptr = reinterpret_cast<uint64_t*>(base + 2);
+    *seq_ptr = 0x1122334455667788;
+    ASSERT_EQ(0x1122334455667788, resp.respSeq);
+    return true;
+}
+
+TEST(protocol_msg_hdr_wire_layout) {
+    // Verify MsgHdr packed layout
+    MsgHdr hdr;
+    std::memset(&hdr, 0, sizeof(hdr));
+    char* base = reinterpret_cast<char*>(&hdr);
+    uint64_t* seq_ptr = reinterpret_cast<uint64_t*>(base + 0);
+    *seq_ptr = 0xAABBCCDDEEFF0011;
+    ASSERT_EQ(0xAABBCCDDEEFF0011, hdr.msgSeqNum);
+    uint32_t* ts_ptr = reinterpret_cast<uint32_t*>(base + 8);
+    *ts_ptr = 0x12345678;
+    ASSERT_EQ(0x12345678U, hdr.timestamp);
+    uint16_t* flags_ptr = reinterpret_cast<uint16_t*>(base + 12);
+    *flags_ptr = 0xABCD;
+    ASSERT_EQ(0xABCD, hdr.flags);
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// Memory Pool Edge Case Tests
+// ----------------------------------------------------------------------------
+
+TEST(pool_all_size_classes) {
+    // Verify all 8 size classes work
+    MemoryPool pool;
+    size_t sizes[] = {1, 64, 65, 256, 257, 1024, 1025, 4096, 4097,
+                      16384, 16385, 65536, 65537, 131072, 131073, 262144};
+    for (size_t s : sizes) {
+        auto buf = pool.allocate(s);
+        ASSERT_TRUE(buf != nullptr);
+        ASSERT_TRUE(buf->capacity >= s);
+        // Write a byte at the boundary to verify no overflow
+        buf->data[s - 1] = 0x42;
+        ASSERT_EQ(0x42, buf->data[s - 1]);
+    }
+    return true;
+}
+
+TEST(pool_shared_ptr_refcount) {
+    // Verify shared_ptr reference counting with pool deleter
+    MemoryPool pool;
+    auto buf1 = pool.allocate(64);
+    ASSERT_TRUE(buf1 != nullptr);
+    ASSERT_EQ(1, buf1.use_count());
+    {
+        auto buf2 = buf1;
+        ASSERT_EQ(2, buf1.use_count());
+        ASSERT_EQ(2, buf2.use_count());
+    }
+    ASSERT_EQ(1, buf1.use_count());
+    return true;
+}
+
+TEST(pool_buffer_create_destroy) {
+    // Direct Buffer create/destroy (not via pool)
+    Buffer* buf = Buffer::create(128);
+    ASSERT_TRUE(buf != nullptr);
+    ASSERT_EQ(128, buf->capacity);
+    buf->data[0] = 'X';
+    ASSERT_EQ('X', buf->data[0]);
+    Buffer::destroy(buf);
+    return true;
+}
+
+TEST(pool_buffer_zeroed_on_create) {
+    // Buffers created via Buffer::create() should be zero-initialized
+    Buffer* buf = Buffer::create(256);
+    ASSERT_TRUE(buf != nullptr);
+    bool all_zero = true;
+    for (int i = 0; i < 256; ++i) {
+        if (buf->data[i] != 0) {
+            all_zero = false;
+            break;
+        }
+    }
+    ASSERT_TRUE(all_zero);
+    Buffer::destroy(buf);
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// LockFreeRingBuffer Edge Case Tests
+// ----------------------------------------------------------------------------
+
+TEST(ringbuffer_wait_timeout_push) {
+    // push_wait with a very short timeout on a full queue should timeout
+    LockFreeRingBuffer<int> rb(2);
+    ASSERT_TRUE(rb.push(1));
+    ASSERT_TRUE(rb.push(2));
+    // Queue is full, push_wait with 1ms timeout should fail
+    ASSERT_FALSE(rb.push_wait(3, 1));
+    return true;
+}
+
+TEST(ringbuffer_wait_timeout_pop) {
+    // pop_wait with a very short timeout on an empty queue should timeout
+    LockFreeRingBuffer<int> rb(4);
+    int val = 999;
+    ASSERT_FALSE(rb.pop_wait(val, 1));
+    ASSERT_EQ(999, val);  // unchanged
+    return true;
+}
+
+TEST(ringbuffer_wait_success_pop) {
+    // pop_wait should succeed when item arrives within timeout
+    LockFreeRingBuffer<int> rb(4);
+    rb.push(42);
+    int val = 0;
+    ASSERT_TRUE(rb.pop_wait(val, 100));
+    ASSERT_EQ(42, val);
+    return true;
+}
+
+TEST(ringbuffer_capacity_power_of_2) {
+    // Verify capacity is always rounded to next power of 2
+    LockFreeRingBuffer<int> rb1(3);
+    ASSERT_EQ(4, rb1.capacity());
+    LockFreeRingBuffer<int> rb2(5);
+    ASSERT_EQ(8, rb2.capacity());
+    LockFreeRingBuffer<int> rb3(17);
+    ASSERT_EQ(32, rb3.capacity());
+    LockFreeRingBuffer<int> rb4(1024);
+    ASSERT_EQ(1024, rb4.capacity());  // already power of 2
+    return true;
+}
+
+TEST(ringbuffer_zero_capacity) {
+    // Zero requested capacity should result in capacity 1
+    LockFreeRingBuffer<int> rb(0);
+    ASSERT_EQ(1, rb.capacity());
+    ASSERT_TRUE(rb.empty());
+    ASSERT_TRUE(rb.push(42));
+    ASSERT_TRUE(rb.full());
+    int val;
+    ASSERT_TRUE(rb.pop(val));
+    ASSERT_EQ(42, val);
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// Config Parser Additional Edge Cases
+// ----------------------------------------------------------------------------
+
+TEST(config_parser_duplicate_keys) {
+    // JSON with duplicate keys (nlohmann/json keeps last value)
+    const char* tmpfile = "/tmp/test_config_dup.json";
+    FILE* f = std::fopen(tmpfile, "w");
+    ASSERT_TRUE(f != nullptr);
+    std::fprintf(f, "{\n");
+    std::fprintf(f, "  \"connections\": [{\"host\":\"127.0.0.1\",\"port\":8888,\"item\":\"x\",\"client_id\":\"c\"}],\n");
+    std::fprintf(f, "  \"global\": {\"workers\": 2, \"workers\": 4}\n");
+    std::fprintf(f, "}\n");
+    std::fclose(f);
+
+    MsgClientConfig config;
+    std::string error;
+    bool result = parseConfigFile(tmpfile, config, error);
+
+    ASSERT_TRUE(result);
+    // nlohmann/json keeps the last value for duplicate keys
+    ASSERT_EQ(4, config.worker_thread_count);
+
+    std::remove(tmpfile);
+    return true;
+}
+
+TEST(config_parser_missing_required_fields) {
+    // Connection missing 'item' field - parser uses default "default"
+    const char* tmpfile = "/tmp/test_config_missing_item.json";
+    FILE* f = std::fopen(tmpfile, "w");
+    ASSERT_TRUE(f != nullptr);
+    std::fprintf(f, "{\"connections\": [{\"host\":\"127.0.0.1\",\"port\":8888,\"client_id\":\"c\"}]}\n");
+    std::fclose(f);
+
+    MsgClientConfig config;
+    std::string error;
+    bool result = parseConfigFile(tmpfile, config, error);
+
+    // Parser uses default item_name "default" when missing, so this succeeds
+    ASSERT_TRUE(result);
+    ASSERT_STREQ("default", config.connections[0].item_name);
+
+    std::remove(tmpfile);
+    return true;
+}
+
+TEST(config_parser_missing_required_port) {
+    // Connection missing 'port' field (should use default)
+    const char* tmpfile = "/tmp/test_config_missing_port.json";
+    FILE* f = std::fopen(tmpfile, "w");
+    ASSERT_TRUE(f != nullptr);
+    std::fprintf(f, "{\"connections\": [{\"host\":\"127.0.0.1\",\"item\":\"x\",\"client_id\":\"c\"}]}\n");
+    std::fclose(f);
+
+    MsgClientConfig config;
+    std::string error;
+    bool result = parseConfigFile(tmpfile, config, error);
+
+    ASSERT_TRUE(result);
+    ASSERT_EQ(Defaults::PORT, config.connections[0].endpoints[0].port);
+
+    std::remove(tmpfile);
+    return true;
+}
+
+TEST(config_parser_aggregation_invalid_window) {
+    // Aggregation with window_ms = 0 should fail validation
+    const char* tmpfile = "/tmp/test_config_agg_bad.json";
+    FILE* f = std::fopen(tmpfile, "w");
+    ASSERT_TRUE(f != nullptr);
+    std::fprintf(f, "{\n");
+    std::fprintf(f, "  \"connections\": [{\"host\":\"127.0.0.1\",\"port\":8888,\"item\":\"x\",\"client_id\":\"c\"}],\n");
+    std::fprintf(f, "  \"aggregation\": {\"enabled\": true, \"window_ms\": 0}\n");
+    std::fprintf(f, "}\n");
+    std::fclose(f);
+
+    MsgClientConfig config;
+    std::string error;
+    bool result = parseConfigFile(tmpfile, config, error);
+
+    ASSERT_FALSE(result);
+    ASSERT_TRUE(!error.empty());
+
+    std::remove(tmpfile);
+    return true;
+}
+
+TEST(config_parser_aggregation_disabled_no_validation) {
+    // Disabled aggregation should not validate window_ms
+    const char* tmpfile = "/tmp/test_config_agg_disabled.json";
+    FILE* f = std::fopen(tmpfile, "w");
+    ASSERT_TRUE(f != nullptr);
+    std::fprintf(f, "{\n");
+    std::fprintf(f, "  \"connections\": [{\"host\":\"127.0.0.1\",\"port\":8888,\"item\":\"x\",\"client_id\":\"c\"}],\n");
+    std::fprintf(f, "  \"aggregation\": {\"enabled\": false, \"window_ms\": 0}\n");
+    std::fprintf(f, "}\n");
+    std::fclose(f);
+
+    MsgClientConfig config;
+    std::string error;
+    bool result = parseConfigFile(tmpfile, config, error);
+
+    ASSERT_TRUE(result);
+    ASSERT_FALSE(config.aggregation_config.enabled);
+
+    std::remove(tmpfile);
+    return true;
+}
+
+TEST(config_parser_invalid_type_workers) {
+    // workers as string instead of number
+    const char* tmpfile = "/tmp/test_config_bad_type.json";
+    FILE* f = std::fopen(tmpfile, "w");
+    ASSERT_TRUE(f != nullptr);
+    std::fprintf(f, "{\n");
+    std::fprintf(f, "  \"global\": {\"workers\": \"four\"},\n");
+    std::fprintf(f, "  \"connections\": [{\"host\":\"127.0.0.1\",\"port\":8888,\"item\":\"x\",\"client_id\":\"c\"}]\n");
+    std::fprintf(f, "}\n");
+    std::fclose(f);
+
+    MsgClientConfig config;
+    std::string error;
+    bool result = parseConfigFile(tmpfile, config, error);
+
+    ASSERT_FALSE(result);
+    ASSERT_TRUE(!error.empty());
+
+    std::remove(tmpfile);
+    return true;
+}
+
+TEST(config_parser_whitespace_only_file) {
+    const char* tmpfile = "/tmp/test_config_ws.json";
+    FILE* f = std::fopen(tmpfile, "w");
+    ASSERT_TRUE(f != nullptr);
+    std::fprintf(f, "   \n\t\n   \n");
+    std::fclose(f);
+
+    MsgClientConfig config;
+    std::string error;
+    bool result = parseConfigFile(tmpfile, config, error);
+
+    ASSERT_FALSE(result);
+    ASSERT_TRUE(!error.empty());
+
+    std::remove(tmpfile);
     return true;
 }
 
