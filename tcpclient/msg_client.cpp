@@ -259,35 +259,46 @@ MsgClient::MsgClient(const MsgClientConfig& config)
         LOG_INFO("[MsgClient] Epoll instance created (fd=%d)", epoll_fd_.load());
     }
     
-    // Initialize aggregation components if enabled
-    if (config_.aggregation_config.enabled) {
-        disk_writer_.reset(new metrics::DiskWriter(config_.aggregation_config.output_dir));
-        disk_writer_->start();
+    initAggregationComponents();
+}
 
-        uint64_t bucket_ns = config_.aggregation_config.window_ms * 1000000ULL;
-        size_t num_shards = std::thread::hardware_concurrency();
-        if (num_shards == 0) num_shards = 4;
+// ============================================================================
+// Aggregation Components Setup
+// ============================================================================
+// Extracted from the constructor to reduce its length and improve readability.
+// ============================================================================
 
-        orders_aggregator_.reset(new metrics::Aggregator(
-            "orders", config_.aggregation_config.filename_prefix,
-            bucket_ns, num_shards, true, config_.aggregation_config.output_format,
-            disk_writer_.get(), config_.aggregation_config.output_dir));
-
-        trades_aggregator_.reset(new metrics::Aggregator(
-            "trades", config_.aggregation_config.filename_prefix,
-            bucket_ns, num_shards, true, config_.aggregation_config.output_format,
-            disk_writer_.get(), config_.aggregation_config.output_dir));
-
-        quotes_aggregator_.reset(new metrics::Aggregator(
-            "quotes", config_.aggregation_config.filename_prefix,
-            bucket_ns, num_shards, true, config_.aggregation_config.output_format,
-            disk_writer_.get(), config_.aggregation_config.output_dir));
-
-        LOG_INFO("[MsgClient] Aggregation enabled: window_ms=%lu, format=%s, output=%s, shards=%zu",
-                 config_.aggregation_config.window_ms,
-                 config_.aggregation_config.output_format == metrics::OutputFormat::CSV ? "csv" : "influxdb_line",
-                 config_.aggregation_config.output_dir.c_str(), num_shards);
+void MsgClient::initAggregationComponents() {
+    if (!config_.aggregation_config.enabled) {
+        return;
     }
+
+    disk_writer_.reset(new metrics::DiskWriter(config_.aggregation_config.output_dir));
+    disk_writer_->start();
+
+    uint64_t bucket_ns = config_.aggregation_config.window_ms * 1000000ULL;
+    size_t num_shards = std::thread::hardware_concurrency();
+    if (num_shards == 0) num_shards = 4;
+
+    orders_aggregator_.reset(new metrics::Aggregator(
+        "orders", config_.aggregation_config.filename_prefix,
+        bucket_ns, num_shards, true, config_.aggregation_config.output_format,
+        disk_writer_.get(), config_.aggregation_config.output_dir));
+
+    trades_aggregator_.reset(new metrics::Aggregator(
+        "trades", config_.aggregation_config.filename_prefix,
+        bucket_ns, num_shards, true, config_.aggregation_config.output_format,
+        disk_writer_.get(), config_.aggregation_config.output_dir));
+
+    quotes_aggregator_.reset(new metrics::Aggregator(
+        "quotes", config_.aggregation_config.filename_prefix,
+        bucket_ns, num_shards, true, config_.aggregation_config.output_format,
+        disk_writer_.get(), config_.aggregation_config.output_dir));
+
+    LOG_INFO("[MsgClient] Aggregation enabled: window_ms=%lu, format=%s, output=%s, shards=%zu",
+             config_.aggregation_config.window_ms,
+             config_.aggregation_config.output_format == metrics::OutputFormat::CSV ? "csv" : "influxdb_line",
+             config_.aggregation_config.output_dir.c_str(), num_shards);
 }
 
 MsgClient::~MsgClient() {
@@ -333,6 +344,12 @@ void MsgClient::start() {
              connections_.size(), config_.worker_thread_count);
 }
 
+void MsgClient::joinThread(std::thread& t) {
+    if (t.joinable()) {
+        t.join();
+    }
+}
+
 void MsgClient::stop() {
     if (!running_.load()) return;
     running_.store(false);
@@ -349,14 +366,10 @@ void MsgClient::stop() {
     // first keeps sanitizers happy and is formally correct.
     int epoll_fd_local = epoll_fd_.exchange(-1);
     if (epoll_fd_local >= 0) {
-        if (io_thread_.joinable()) {
-            io_thread_.join();
-        }
+        joinThread(io_thread_);
         ::close(epoll_fd_local);
     } else {
-        if (io_thread_.joinable()) {
-            io_thread_.join();
-        }
+        joinThread(io_thread_);
     }
 
     // Join order: IO → decoder → workers (producer-to-consumer).
@@ -369,13 +382,9 @@ void MsgClient::stop() {
     //     to worker queues before workers exit.
     //   - Joining workers last guarantees every message that entered the
     //     pipeline is either processed or explicitly dropped.
-    if (decoder_thread_.joinable()) {
-        decoder_thread_.join();
-    }
+    joinThread(decoder_thread_);
     for (auto& t : worker_threads_) {
-        if (t.joinable()) {
-            t.join();
-        }
+        joinThread(t);
     }
     worker_threads_.clear();
 
@@ -1132,96 +1141,7 @@ void MsgClient::workerLoop(size_t worker_index) {
         
         // Process for aggregation if enabled
         if (orders_aggregator_) {
-            MarketDataType msg_type = parseMessageType(msg.body, msg.body_length);
-            if (msg_type != MarketDataType::UNKNOWN) {
-                const MsgHeader* hdr = reinterpret_cast<const MsgHeader*>(msg.body);
-                uint64_t ts_ns = hdr->timestamp_ns;
-
-                switch (msg_type) {
-                    case MarketDataType::ORDER_NEW: {
-                        const auto* m = castMessage<OrderNewMsg>(msg.body, msg.body_length);
-                        if (m) {
-                            metrics::TagSet tags;
-                            tags.add("Market", m->getMarket());
-                            tags.add("Instrument", m->getInstrument());
-                            tags.add("Broker", m->getBroker());
-                            orders_aggregator_->add(tags, "newOrders", static_cast<int64_t>(1), ts_ns);
-                            orders_aggregator_->add(tags, "openOrders", static_cast<int64_t>(1), ts_ns);
-                            orders_aggregator_->add(tags, "totalOrderQty", static_cast<int64_t>(m->quantity), ts_ns);
-                            orders_aggregator_->onIncomingTimestamp(ts_ns);
-                        }
-                        break;
-                    }
-                    case MarketDataType::ORDER_UPDATE: {
-                        const auto* m = castMessage<OrderUpdateMsg>(msg.body, msg.body_length);
-                        if (m) {
-                            metrics::TagSet tags;
-                            tags.add("Market", m->getMarket());
-                            tags.add("Instrument", m->getInstrument());
-                            tags.add("Broker", m->getBroker());
-                            orders_aggregator_->add(tags, "modifiedOrders", static_cast<int64_t>(1), ts_ns);
-                            orders_aggregator_->onIncomingTimestamp(ts_ns);
-                        }
-                        break;
-                    }
-                    case MarketDataType::ORDER_CANCEL: {
-                        const auto* m = castMessage<OrderCancelMsg>(msg.body, msg.body_length);
-                        if (m) {
-                            metrics::TagSet tags;
-                            tags.add("Market", m->getMarket());
-                            tags.add("Instrument", m->getInstrument());
-                            tags.add("Broker", m->getBroker());
-                            orders_aggregator_->add(tags, "cancelledOrders", static_cast<int64_t>(1), ts_ns);
-                            orders_aggregator_->add(tags, "totalCancelQty", static_cast<int64_t>(m->cancelled_qty), ts_ns);
-                            orders_aggregator_->onIncomingTimestamp(ts_ns);
-                        }
-                        break;
-                    }
-                    case MarketDataType::TRADE: {
-                        const auto* m = castMessage<TradeMsg>(msg.body, msg.body_length);
-                        if (m) {
-                            metrics::TagSet tags;
-                            tags.add("Market", m->getMarket());
-                            tags.add("Instrument", m->getInstrument());
-                            trades_aggregator_->add(tags, "numTrades", static_cast<int64_t>(1), ts_ns);
-                            trades_aggregator_->add(tags, "totalVolume", static_cast<int64_t>(m->quantity), ts_ns);
-                            trades_aggregator_->add(tags, "totalValue", m->price * m->quantity, ts_ns);
-                            trades_aggregator_->set(tags, "highPrice", m->price, ts_ns);
-                            trades_aggregator_->set(tags, "lowPrice", m->price, ts_ns);
-                            trades_aggregator_->onIncomingTimestamp(ts_ns);
-                        }
-                        break;
-                    }
-                    case MarketDataType::QUOTE_BID: {
-                        const auto* m = castMessage<QuoteBidMsg>(msg.body, msg.body_length);
-                        if (m) {
-                            metrics::TagSet tags;
-                            tags.add("Market", m->getMarket());
-                            tags.add("Instrument", m->getInstrument());
-                            quotes_aggregator_->add(tags, "bidUpdates", static_cast<int64_t>(1), ts_ns);
-                            quotes_aggregator_->set(tags, "bestBid", m->price, ts_ns);
-                            quotes_aggregator_->set(tags, "bestBidQty", static_cast<int64_t>(m->quantity), ts_ns);
-                            quotes_aggregator_->onIncomingTimestamp(ts_ns);
-                        }
-                        break;
-                    }
-                    case MarketDataType::QUOTE_ASK: {
-                        const auto* m = castMessage<QuoteAskMsg>(msg.body, msg.body_length);
-                        if (m) {
-                            metrics::TagSet tags;
-                            tags.add("Market", m->getMarket());
-                            tags.add("Instrument", m->getInstrument());
-                            quotes_aggregator_->add(tags, "askUpdates", static_cast<int64_t>(1), ts_ns);
-                            quotes_aggregator_->set(tags, "bestAsk", m->price, ts_ns);
-                            quotes_aggregator_->set(tags, "bestAskQty", static_cast<int64_t>(m->quantity), ts_ns);
-                            quotes_aggregator_->onIncomingTimestamp(ts_ns);
-                        }
-                        break;
-                    }
-                    default:
-                        break;
-                }
-            }
+            processAggregationMessage(msg);
         }
 
         // Invoke handler with connection_id
@@ -1238,5 +1158,108 @@ void MsgClient::workerLoop(size_t worker_index) {
         // (or destroy it if the pool's free list is full) once the refcount
         // drops to zero.
         msg.buffer.reset();
+    }
+}
+
+// ============================================================================
+// Aggregation Message Processing
+// ============================================================================
+// Extracted from workerLoop() to reduce its length and nesting depth.
+// This helper routes a decoded message to the appropriate aggregator
+// based on its market-data type.  No logic changes — pure refactoring.
+// ============================================================================
+
+void MsgClient::processAggregationMessage(const SubMessage& msg) {
+    MarketDataType msg_type = parseMessageType(msg.body, msg.body_length);
+    if (msg_type == MarketDataType::UNKNOWN) {
+        return;
+    }
+
+    const MsgHeader* hdr = reinterpret_cast<const MsgHeader*>(msg.body);
+    uint64_t ts_ns = hdr->timestamp_ns;
+
+    switch (msg_type) {
+        case MarketDataType::ORDER_NEW: {
+            const auto* m = castMessage<OrderNewMsg>(msg.body, msg.body_length);
+            if (m) {
+                metrics::TagSet tags;
+                tags.add("Market", m->getMarket());
+                tags.add("Instrument", m->getInstrument());
+                tags.add("Broker", m->getBroker());
+                orders_aggregator_->add(tags, "newOrders", static_cast<int64_t>(1), ts_ns);
+                orders_aggregator_->add(tags, "openOrders", static_cast<int64_t>(1), ts_ns);
+                orders_aggregator_->add(tags, "totalOrderQty", static_cast<int64_t>(m->quantity), ts_ns);
+                orders_aggregator_->onIncomingTimestamp(ts_ns);
+            }
+            break;
+        }
+        case MarketDataType::ORDER_UPDATE: {
+            const auto* m = castMessage<OrderUpdateMsg>(msg.body, msg.body_length);
+            if (m) {
+                metrics::TagSet tags;
+                tags.add("Market", m->getMarket());
+                tags.add("Instrument", m->getInstrument());
+                tags.add("Broker", m->getBroker());
+                orders_aggregator_->add(tags, "modifiedOrders", static_cast<int64_t>(1), ts_ns);
+                orders_aggregator_->onIncomingTimestamp(ts_ns);
+            }
+            break;
+        }
+        case MarketDataType::ORDER_CANCEL: {
+            const auto* m = castMessage<OrderCancelMsg>(msg.body, msg.body_length);
+            if (m) {
+                metrics::TagSet tags;
+                tags.add("Market", m->getMarket());
+                tags.add("Instrument", m->getInstrument());
+                tags.add("Broker", m->getBroker());
+                orders_aggregator_->add(tags, "cancelledOrders", static_cast<int64_t>(1), ts_ns);
+                orders_aggregator_->add(tags, "totalCancelQty", static_cast<int64_t>(m->cancelled_qty), ts_ns);
+                orders_aggregator_->onIncomingTimestamp(ts_ns);
+            }
+            break;
+        }
+        case MarketDataType::TRADE: {
+            const auto* m = castMessage<TradeMsg>(msg.body, msg.body_length);
+            if (m) {
+                metrics::TagSet tags;
+                tags.add("Market", m->getMarket());
+                tags.add("Instrument", m->getInstrument());
+                trades_aggregator_->add(tags, "numTrades", static_cast<int64_t>(1), ts_ns);
+                trades_aggregator_->add(tags, "totalVolume", static_cast<int64_t>(m->quantity), ts_ns);
+                trades_aggregator_->add(tags, "totalValue", m->price * m->quantity, ts_ns);
+                trades_aggregator_->set(tags, "highPrice", m->price, ts_ns);
+                trades_aggregator_->set(tags, "lowPrice", m->price, ts_ns);
+                trades_aggregator_->onIncomingTimestamp(ts_ns);
+            }
+            break;
+        }
+        case MarketDataType::QUOTE_BID: {
+            const auto* m = castMessage<QuoteBidMsg>(msg.body, msg.body_length);
+            if (m) {
+                metrics::TagSet tags;
+                tags.add("Market", m->getMarket());
+                tags.add("Instrument", m->getInstrument());
+                quotes_aggregator_->add(tags, "bidUpdates", static_cast<int64_t>(1), ts_ns);
+                quotes_aggregator_->set(tags, "bestBid", m->price, ts_ns);
+                quotes_aggregator_->set(tags, "bestBidQty", static_cast<int64_t>(m->quantity), ts_ns);
+                quotes_aggregator_->onIncomingTimestamp(ts_ns);
+            }
+            break;
+        }
+        case MarketDataType::QUOTE_ASK: {
+            const auto* m = castMessage<QuoteAskMsg>(msg.body, msg.body_length);
+            if (m) {
+                metrics::TagSet tags;
+                tags.add("Market", m->getMarket());
+                tags.add("Instrument", m->getInstrument());
+                quotes_aggregator_->add(tags, "askUpdates", static_cast<int64_t>(1), ts_ns);
+                quotes_aggregator_->set(tags, "bestAsk", m->price, ts_ns);
+                quotes_aggregator_->set(tags, "bestAskQty", static_cast<int64_t>(m->quantity), ts_ns);
+                quotes_aggregator_->onIncomingTimestamp(ts_ns);
+            }
+            break;
+        }
+        default:
+            break;
     }
 }

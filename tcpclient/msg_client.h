@@ -478,8 +478,17 @@ private:
     bool processRecvData(size_t conn_idx, char* buf_data, size_t& buf_used,
                          size_t buf_capacity, std::shared_ptr<Buffer>& buf_ref);
 
+    // Aggregation helper (extracted from workerLoop)
+    void processAggregationMessage(const SubMessage& msg);
+
+    // Thread join helper
+    static void joinThread(std::thread& t);
+
     // Statistics helper
     ConnectionStats buildConnectionStats(size_t conn_idx) const;
+
+    // Aggregation setup helper (extracted from constructor)
+    void initAggregationComponents();
 
     // Failover
     void advanceToNextEndpoint(size_t conn_idx);

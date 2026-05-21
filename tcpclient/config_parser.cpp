@@ -180,47 +180,33 @@ namespace {
 
         return true;
     }
-}
 
-bool parseConfigFile(const std::string& filepath, 
-                     MsgClientConfig& config, 
-                     std::string& error_message) {
-    // Read file
-    std::ifstream file(filepath);
-    if (!file.is_open()) {
-        error_message = "Cannot open config file: " + filepath;
-        return false;
-    }
-
-    // Parse JSON
-    json j;
-    try {
-        file >> j;
-    } catch (const json::parse_error& e) {
-        error_message = std::string("JSON parse error: ") + e.what();
-        return false;
-    }
-
-    // Validate JSON types before parsing
-    if (j.contains("global") && !j["global"].is_object()) {
-        error_message = "'global' must be an object";
-        return false;
-    }
-    
-    if (j.contains("connections") && !j["connections"].is_array()) {
-        error_message = "'connections' must be an array";
-        return false;
-    }
-    
-    if (j.contains("memory_pool") && !j["memory_pool"].is_object()) {
-        error_message = "'memory_pool' must be an object";
-        return false;
+    // ------------------------------------------------------------------------
+    // Top-level JSON type validation
+    // ------------------------------------------------------------------------
+    bool validateTopLevelTypes(const json& j, std::string& error) {
+        if (j.contains("global") && !j["global"].is_object()) {
+            error = "'global' must be an object";
+            return false;
+        }
+        if (j.contains("connections") && !j["connections"].is_array()) {
+            error = "'connections' must be an array";
+            return false;
+        }
+        if (j.contains("memory_pool") && !j["memory_pool"].is_object()) {
+            error = "'memory_pool' must be an object";
+            return false;
+        }
+        return true;
     }
 
-    // Parse global settings
-    if (j.contains("global")) {
+    // ------------------------------------------------------------------------
+    // Parse global settings section
+    // ------------------------------------------------------------------------
+    bool parseGlobalSection(const json& j, MsgClientConfig& config, std::string& error) {
+        if (!j.contains("global")) return true;
+
         const auto& global = j["global"];
-        
         try {
             if (global.contains("workers")) {
                 config.worker_thread_count = global["workers"].get<size_t>();
@@ -238,128 +224,163 @@ bool parseConfigFile(const std::string& filepath,
                 config.queue_push_timeout_ms = global["queue_push_timeout_ms"].get<int>();
             }
         } catch (const json::type_error& e) {
-            error_message = std::string("Type error in 'global' section: ") + e.what();
+            error = std::string("Type error in 'global' section: ") + e.what();
             return false;
         }
+        return true;
     }
 
-    // Parse connections
-    if (j.contains("connections")) {
-        const auto& connections = j["connections"];
+    // Forward declarations for connection parsing helpers
+    bool parseEndpointsArray(const json& endpoints, size_t conn_idx,
+                             ConnectionConfig& conn_config, std::string& error);
+    bool parseLegacyEndpoint(const json& conn, size_t conn_idx,
+                             ConnectionConfig& conn_config, std::string& error);
+    bool parseConnectionStringField(const json& conn, const char* field_name,
+                                    size_t conn_idx, std::string& out_value,
+                                    std::string& error);
+    bool parseSingleConnection(const json& conn, size_t conn_idx,
+                               ConnectionConfig& conn_config, std::string& error);
 
+    // ------------------------------------------------------------------------
+    // Parse connections section
+    // ------------------------------------------------------------------------
+    bool parseConnectionsSection(const json& j, MsgClientConfig& config, std::string& error) {
+        if (!j.contains("connections")) return true;
+
+        const auto& connections = j["connections"];
         for (size_t i = 0; i < connections.size(); ++i) {
             const auto& conn = connections[i];
-            
+
             if (!conn.is_object()) {
-                error_message = "connections[" + std::to_string(i) + "] must be an object";
+                error = "connections[" + std::to_string(i) + "] must be an object";
                 return false;
             }
-            
+
             ConnectionConfig conn_config;
-
-            try {
-                auto it_endpoints = conn.find("endpoints");
-                if (it_endpoints != conn.end()) {
-                    const auto& endpoints = *it_endpoints;
-                    if (!endpoints.is_array()) {
-                        error_message = "connections[" + std::to_string(i) + "].endpoints must be an array";
-                        return false;
-                    }
-                    for (size_t j = 0; j < endpoints.size(); ++j) {
-                        const auto& ep = endpoints[j];
-                        if (!ep.is_object()) {
-                            error_message = "connections[" + std::to_string(i) + "].endpoints[" +
-                                           std::to_string(j) + "] must be an object";
-                            return false;
-                        }
-                        EndpointConfig ep_cfg;
-                        auto it_host = ep.find("host");
-                        if (it_host != ep.end()) {
-                            if (!it_host->is_string()) {
-                                error_message = "connections[" + std::to_string(i) + "].endpoints[" +
-                                               std::to_string(j) + "].host must be a string";
-                                return false;
-                            }
-                            ep_cfg.host = it_host->get<std::string>();
-                        }
-                        auto it_port = ep.find("port");
-                        if (it_port != ep.end()) {
-                            int port_val = it_port->get<int>();
-                            if (!validateRangeInt("connections[" + std::to_string(i) + "].endpoints[" +
-                                                 std::to_string(j) + "].port",
-                                                 port_val, Defaults::MIN_PORT, Defaults::MAX_PORT, error_message)) {
-                                return false;
-                            }
-                            ep_cfg.port = static_cast<uint16_t>(port_val);
-                        }
-                        conn_config.endpoints.push_back(ep_cfg);
-                    }
-                }
-
-                if (conn_config.endpoints.empty()) {
-                    auto it_host = conn.find("host");
-                    if (it_host != conn.end()) {
-                        if (!it_host->is_string()) {
-                            error_message = "connections[" + std::to_string(i) + "].host must be a string";
-                            return false;
-                        }
-                        std::string h = it_host->get<std::string>();
-                        uint16_t p = Defaults::PORT;
-                        auto it_port = conn.find("port");
-                        if (it_port != conn.end()) {
-                            int port_val = it_port->get<int>();
-                            if (!validateRangeInt("connections[" + std::to_string(i) + "].port",
-                                                 port_val, Defaults::MIN_PORT, Defaults::MAX_PORT, error_message)) {
-                                return false;
-                            }
-                            p = static_cast<uint16_t>(port_val);
-                        }
-                        conn_config.endpoints.push_back({h, p});
-                    }
-                }
-
-                auto it_failover = conn.find("failover_retries");
-                if (it_failover != conn.end()) {
-                    conn_config.max_retries_per_endpoint = it_failover->get<int>();
-                }
-                auto it_item = conn.find("item");
-                if (it_item != conn.end()) {
-                    if (!it_item->is_string()) {
-                        error_message = "connections[" + std::to_string(i) + "].item must be a string";
-                        return false;
-                    }
-                    conn_config.item_name = it_item->get<std::string>();
-                }
-                auto it_client_id = conn.find("client_id");
-                if (it_client_id != conn.end()) {
-                    if (!it_client_id->is_string()) {
-                        error_message = "connections[" + std::to_string(i) + "].client_id must be a string";
-                        return false;
-                    }
-                    conn_config.client_id = it_client_id->get<std::string>();
-                }
-                auto it_seq = conn.find("starting_seq");
-                if (it_seq != conn.end()) {
-                    conn_config.starting_seq_num = it_seq->get<uint64_t>();
-                }
-            } catch (const json::type_error& e) {
-                error_message = "Type error in connections[" + std::to_string(i) + "]: " + e.what();
-                return false;
-            }
-
+            if (!parseSingleConnection(conn, i, conn_config, error)) return false;
             config.connections.push_back(conn_config);
         }
+        return true;
     }
 
-    // Parse aggregation configuration (optional)
-    if (j.contains("aggregation")) {
-        const auto& agg = j["aggregation"];
-        
-        if (!agg.is_object()) {
-            error_message = "'aggregation' must be an object";
+    bool parseSingleConnection(const json& conn, size_t conn_idx,
+                               ConnectionConfig& conn_config, std::string& error) {
+        try {
+            auto it_endpoints = conn.find("endpoints");
+            if (it_endpoints != conn.end()) {
+                if (!parseEndpointsArray(*it_endpoints, conn_idx, conn_config, error)) return false;
+            }
+
+            if (conn_config.endpoints.empty()) {
+                if (!parseLegacyEndpoint(conn, conn_idx, conn_config, error)) return false;
+            }
+
+            auto it_failover = conn.find("failover_retries");
+            if (it_failover != conn.end()) {
+                conn_config.max_retries_per_endpoint = it_failover->get<int>();
+            }
+
+            if (!parseConnectionStringField(conn, "item", conn_idx, conn_config.item_name, error)) return false;
+            if (!parseConnectionStringField(conn, "client_id", conn_idx, conn_config.client_id, error)) return false;
+
+            auto it_seq = conn.find("starting_seq");
+            if (it_seq != conn.end()) {
+                conn_config.starting_seq_num = it_seq->get<uint64_t>();
+            }
+        } catch (const json::type_error& e) {
+            error = "Type error in connections[" + std::to_string(conn_idx) + "]: " + e.what();
             return false;
         }
-        
+        return true;
+    }
+
+    bool parseEndpointsArray(const json& endpoints, size_t conn_idx,
+                             ConnectionConfig& conn_config, std::string& error) {
+        if (!endpoints.is_array()) {
+            error = "connections[" + std::to_string(conn_idx) + "].endpoints must be an array";
+            return false;
+        }
+        for (size_t j = 0; j < endpoints.size(); ++j) {
+            const auto& ep = endpoints[j];
+            if (!ep.is_object()) {
+                error = "connections[" + std::to_string(conn_idx) + "].endpoints[" +
+                       std::to_string(j) + "] must be an object";
+                return false;
+            }
+            EndpointConfig ep_cfg;
+            auto it_host = ep.find("host");
+            if (it_host != ep.end()) {
+                if (!it_host->is_string()) {
+                    error = "connections[" + std::to_string(conn_idx) + "].endpoints[" +
+                           std::to_string(j) + "].host must be a string";
+                    return false;
+                }
+                ep_cfg.host = it_host->get<std::string>();
+            }
+            auto it_port = ep.find("port");
+            if (it_port != ep.end()) {
+                int port_val = it_port->get<int>();
+                if (!validateRangeInt("connections[" + std::to_string(conn_idx) + "].endpoints[" +
+                                     std::to_string(j) + "].port",
+                                     port_val, Defaults::MIN_PORT, Defaults::MAX_PORT, error)) {
+                    return false;
+                }
+                ep_cfg.port = static_cast<uint16_t>(port_val);
+            }
+            conn_config.endpoints.push_back(ep_cfg);
+        }
+        return true;
+    }
+
+    bool parseLegacyEndpoint(const json& conn, size_t conn_idx,
+                             ConnectionConfig& conn_config, std::string& error) {
+        auto it_host = conn.find("host");
+        if (it_host != conn.end()) {
+            if (!it_host->is_string()) {
+                error = "connections[" + std::to_string(conn_idx) + "].host must be a string";
+                return false;
+            }
+            std::string h = it_host->get<std::string>();
+            uint16_t p = Defaults::PORT;
+            auto it_port = conn.find("port");
+            if (it_port != conn.end()) {
+                int port_val = it_port->get<int>();
+                if (!validateRangeInt("connections[" + std::to_string(conn_idx) + "].port",
+                                     port_val, Defaults::MIN_PORT, Defaults::MAX_PORT, error)) {
+                    return false;
+                }
+                p = static_cast<uint16_t>(port_val);
+            }
+            conn_config.endpoints.push_back({h, p});
+        }
+        return true;
+    }
+
+    bool parseConnectionStringField(const json& conn, const char* field_name,
+                                    size_t conn_idx, std::string& out_value,
+                                    std::string& error) {
+        auto it = conn.find(field_name);
+        if (it == conn.end()) return true;
+        if (!it->is_string()) {
+            error = "connections[" + std::to_string(conn_idx) + "]." + field_name + " must be a string";
+            return false;
+        }
+        out_value = it->get<std::string>();
+        return true;
+    }
+
+    // ------------------------------------------------------------------------
+    // Parse aggregation section
+    // ------------------------------------------------------------------------
+    bool parseAggregationSection(const json& j, MsgClientConfig& config, std::string& error) {
+        if (!j.contains("aggregation")) return true;
+
+        const auto& agg = j["aggregation"];
+        if (!agg.is_object()) {
+            error = "'aggregation' must be an object";
+            return false;
+        }
+
         try {
             if (agg.contains("enabled")) {
                 config.aggregation_config.enabled = agg["enabled"].get<bool>();
@@ -369,7 +390,7 @@ bool parseConfigFile(const std::string& filepath,
             }
             if (agg.contains("output_format")) {
                 if (!agg["output_format"].is_string()) {
-                    error_message = "aggregation.output_format must be a string";
+                    error = "aggregation.output_format must be a string";
                     return false;
                 }
                 std::string fmt = agg["output_format"].get<std::string>();
@@ -381,37 +402,40 @@ bool parseConfigFile(const std::string& filepath,
             }
             if (agg.contains("output_dir")) {
                 if (!agg["output_dir"].is_string()) {
-                    error_message = "aggregation.output_dir must be a string";
+                    error = "aggregation.output_dir must be a string";
                     return false;
                 }
                 config.aggregation_config.output_dir = agg["output_dir"].get<std::string>();
             }
             if (agg.contains("filename_prefix")) {
                 if (!agg["filename_prefix"].is_string()) {
-                    error_message = "aggregation.filename_prefix must be a string";
+                    error = "aggregation.filename_prefix must be a string";
                     return false;
                 }
                 config.aggregation_config.filename_prefix = agg["filename_prefix"].get<std::string>();
             }
         } catch (const json::type_error& e) {
-            error_message = std::string("Type error in 'aggregation' section: ") + e.what();
+            error = std::string("Type error in 'aggregation' section: ") + e.what();
             return false;
         }
-        
-        // Validate aggregation config
+
         std::string agg_error = config.aggregation_config.validate();
         if (!agg_error.empty()) {
-            error_message = "aggregation: " + agg_error;
+            error = "aggregation: " + agg_error;
             return false;
         }
+        return true;
     }
 
-    // Parse memory pool configuration (optional)
-    if (j.contains("memory_pool")) {
+    // ------------------------------------------------------------------------
+    // Parse memory pool section
+    // ------------------------------------------------------------------------
+    bool parseMemoryPoolSection(const json& j, MsgClientConfig& config, std::string& error) {
+        if (!j.contains("memory_pool")) return true;
+
         const auto& pool = j["memory_pool"];
-        
         config.pool_config.clear();
-        // Define default size classes
+
         struct DefaultClass { size_t size; size_t initial; size_t max_free; size_t max_total; };
         std::vector<DefaultClass> defaults = {
             {64, 128, 1024, 4096},
@@ -431,28 +455,57 @@ bool parseConfigFile(const std::string& filepath,
             cfg.max_count = defaults[i].max_free;
             cfg.max_total_allocated = defaults[i].max_total;
 
-            // Allow overriding per size class
             std::string key = "class_" + std::to_string(i);
             if (pool.contains(key)) {
                 const auto& cls = pool[key];
                 if (!cls.is_object()) {
-                    error_message = "memory_pool." + key + " must be an object";
+                    error = "memory_pool." + key + " must be an object";
                     return false;
                 }
-                
                 try {
                     if (cls.contains("initial")) cfg.initial_count = cls["initial"].get<size_t>();
                     if (cls.contains("max_free")) cfg.max_count = cls["max_free"].get<size_t>();
                     if (cls.contains("max_total")) cfg.max_total_allocated = cls["max_total"].get<size_t>();
                 } catch (const json::type_error& e) {
-                    error_message = "Type error in memory_pool." + key + ": " + e.what();
+                    error = "Type error in memory_pool." + key + ": " + e.what();
                     return false;
                 }
             }
-
             config.pool_config.push_back(cfg);
         }
+        return true;
     }
+}
+
+bool parseConfigFile(const std::string& filepath,
+                     MsgClientConfig& config,
+                     std::string& error_message) {
+    // Read file
+    std::ifstream file(filepath);
+    if (!file.is_open()) {
+        error_message = "Cannot open config file: " + filepath;
+        return false;
+    }
+
+    // Parse JSON
+    json j;
+    try {
+        file >> j;
+    } catch (const json::parse_error& e) {
+        error_message = std::string("JSON parse error: ") + e.what();
+        return false;
+    }
+
+    // Validate top-level JSON types before parsing
+    if (!validateTopLevelTypes(j, error_message)) {
+        return false;
+    }
+
+    // Parse each section
+    if (!parseGlobalSection(j, config, error_message)) return false;
+    if (!parseConnectionsSection(j, config, error_message)) return false;
+    if (!parseAggregationSection(j, config, error_message)) return false;
+    if (!parseMemoryPoolSection(j, config, error_message)) return false;
 
     // Final validation of the complete configuration
     if (!validateConfig(config, error_message)) {
