@@ -473,8 +473,8 @@ private:
         const std::vector<bool>& connected,
         const std::chrono::steady_clock::time_point& now) const;
     size_t parseMessagesFromBuffer(
-        size_t conn_idx, char* buf_data, size_t buf_used,
-        std::shared_ptr<Buffer>& buf_ref, bool& parse_error);
+        size_t conn_idx, const char* buf_data, size_t buf_used,
+        const std::shared_ptr<Buffer>& buf_ref, bool& parse_error);
     bool processRecvData(size_t conn_idx, char* buf_data, size_t& buf_used,
                          size_t buf_capacity, std::shared_ptr<Buffer>& buf_ref);
 

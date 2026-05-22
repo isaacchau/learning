@@ -23,7 +23,6 @@
 //     getInstrument(), etc. return raw pointers; callers must use strnlen
 //     or known lengths when converting to std::string.
 // ============================================================================
-// ============================================================================
 
 #ifndef MESSAGE_TYPES_H
 #define MESSAGE_TYPES_H

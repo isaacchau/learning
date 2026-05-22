@@ -825,8 +825,8 @@ int MsgClient::computeEpollTimeoutMs(
 // Parse all complete messages from the receive buffer and push them to raw_queue_.
 // Returns the new parse position.  Sets parse_error if a protocol error occurs.
 size_t MsgClient::parseMessagesFromBuffer(
-    size_t conn_idx, char* buf_data, size_t buf_used,
-    std::shared_ptr<Buffer>& buf_ref, bool& parse_error) {
+    size_t conn_idx, const char* buf_data, size_t buf_used,
+    const std::shared_ptr<Buffer>& buf_ref, bool& parse_error) {
 
     size_t parse_pos = 0;
     parse_error = false;
