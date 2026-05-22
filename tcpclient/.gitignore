@@ -1,4 +1,6 @@
 # Build outputs
+bin/
+build/
 msg_client
 msg_test_server
 test_runner

@@ -56,7 +56,7 @@ static int g_failed = 0;
         return false; \
     } } while(0)
 
-#include "../ini_parser.h"
+#include "ini_parser.h"
 
 // ============================================================================
 // Basic parsing tests

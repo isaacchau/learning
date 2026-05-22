@@ -26,8 +26,10 @@
 
 #include "log_msg.h"
 #include "protocol.h"
+#include "market_data/message_types.h"
 
 #include <arpa/inet.h>
+#include <random>
 #include <errno.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -380,14 +382,23 @@ int main(int argc, char *argv[]) {
     LOG_INFO("Subscription: item=\"%s\", client=\"%s\", lastSeq=%lu", item,
              client_id, req.lastRespSeq);
 
-    // Prepare message template
-    std::vector<char> frame(total_msg_len);
+    // Mock data structures
+    const std::vector<std::string> MOCK_MARKETS = {"NYSE", "NASDAQ", "BATS", "ARCA"};
+    const std::vector<std::string> MOCK_INSTRUMENTS = {"AAPL", "MSFT", "TSLA", "AMZN", "NVDA", "GOOG", "NFLX"};
+    const std::vector<std::string> MOCK_BROKERS = {"GS", "MS", "JPM", "BARC", "UBS", "DB"};
 
-    // Fill body with pattern data
-    char *body_ptr = frame.data() + sizeof(TcpResponse) + sizeof(MsgHdr);
-    for (size_t j = 0; j < msg_size; ++j) {
-      body_ptr[j] = static_cast<char>('A' + (j % 26));
-    }
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<size_t> dist_market(0, MOCK_MARKETS.size() - 1);
+    std::uniform_int_distribution<size_t> dist_instrument(0, MOCK_INSTRUMENTS.size() - 1);
+    std::uniform_int_distribution<size_t> dist_broker(0, MOCK_BROKERS.size() - 1);
+    std::uniform_int_distribution<int> dist_msg_type(0, 5); // 6 message types
+    std::uniform_real_distribution<double> dist_price(50.0, 500.0);
+    std::uniform_int_distribution<uint32_t> dist_qty(10, 1000);
+    std::uniform_int_distribution<int> dist_side(0, 1);
+
+    // Prepare reusable message frame buffer
+    std::vector<char> frame(512, 0);
 
     // Send messages
     uint64_t seq = req.lastRespSeq + 1;
@@ -419,9 +430,91 @@ int main(int argc, char *argv[]) {
         break;
       }
 
+      // Clear the frame buffer
+      std::fill(frame.begin(), frame.end(), 0);
+
+      // Cast pointers (safe because std::vector data is 16-byte aligned and offset is 24-byte)
+      MsgHeader* msg_hdr = reinterpret_cast<MsgHeader*>(frame.data() + sizeof(TcpResponse) + sizeof(MsgHdr));
+      msg_hdr->msg_seq_num = static_cast<uint32_t>(seq);
+      msg_hdr->timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::system_clock::now().time_since_epoch()).count();
+
+      size_t body_size = 0;
+      int mtype = dist_msg_type(gen);
+      
+      if (mtype == 0) {
+        msg_hdr->msg_type = static_cast<uint8_t>(MarketDataType::ORDER_NEW);
+        OrderNewMsg* m = reinterpret_cast<OrderNewMsg*>(msg_hdr);
+        std::strncpy(m->market, MOCK_MARKETS[dist_market(gen)].c_str(), sizeof(m->market) - 1);
+        std::strncpy(m->instrument, MOCK_INSTRUMENTS[dist_instrument(gen)].c_str(), sizeof(m->instrument) - 1);
+        std::strncpy(m->broker, MOCK_BROKERS[dist_broker(gen)].c_str(), sizeof(m->broker) - 1);
+        m->order_id = seq;
+        m->price = dist_price(gen);
+        m->quantity = dist_qty(gen);
+        m->side = dist_side(gen) == 0 ? 'B' : 'S';
+        m->order_type = 'L';
+        body_size = sizeof(OrderNewMsg);
+      } else if (mtype == 1) {
+        msg_hdr->msg_type = static_cast<uint8_t>(MarketDataType::ORDER_UPDATE);
+        OrderUpdateMsg* m = reinterpret_cast<OrderUpdateMsg*>(msg_hdr);
+        std::strncpy(m->market, MOCK_MARKETS[dist_market(gen)].c_str(), sizeof(m->market) - 1);
+        std::strncpy(m->instrument, MOCK_INSTRUMENTS[dist_instrument(gen)].c_str(), sizeof(m->instrument) - 1);
+        std::strncpy(m->broker, MOCK_BROKERS[dist_broker(gen)].c_str(), sizeof(m->broker) - 1);
+        m->order_id = seq;
+        m->new_price = dist_price(gen);
+        m->new_quantity = dist_qty(gen);
+        m->old_quantity = m->new_quantity + 100;
+        m->side = dist_side(gen) == 0 ? 'B' : 'S';
+        body_size = sizeof(OrderUpdateMsg);
+      } else if (mtype == 2) {
+        msg_hdr->msg_type = static_cast<uint8_t>(MarketDataType::ORDER_CANCEL);
+        OrderCancelMsg* m = reinterpret_cast<OrderCancelMsg*>(msg_hdr);
+        std::strncpy(m->market, MOCK_MARKETS[dist_market(gen)].c_str(), sizeof(m->market) - 1);
+        std::strncpy(m->instrument, MOCK_INSTRUMENTS[dist_instrument(gen)].c_str(), sizeof(m->instrument) - 1);
+        std::strncpy(m->broker, MOCK_BROKERS[dist_broker(gen)].c_str(), sizeof(m->broker) - 1);
+        m->order_id = seq;
+        m->cancelled_qty = dist_qty(gen) / 2;
+        m->side = dist_side(gen) == 0 ? 'B' : 'S';
+        m->cancel_reason = 'U';
+        body_size = sizeof(OrderCancelMsg);
+      } else if (mtype == 3) {
+        msg_hdr->msg_type = static_cast<uint8_t>(MarketDataType::TRADE);
+        TradeMsg* m = reinterpret_cast<TradeMsg*>(msg_hdr);
+        std::strncpy(m->market, MOCK_MARKETS[dist_market(gen)].c_str(), sizeof(m->market) - 1);
+        std::strncpy(m->instrument, MOCK_INSTRUMENTS[dist_instrument(gen)].c_str(), sizeof(m->instrument) - 1);
+        m->trade_id = seq;
+        m->bid_order_id = seq - 1;
+        m->ask_order_id = seq - 2;
+        m->price = dist_price(gen);
+        m->quantity = dist_qty(gen);
+        m->aggressor_side = dist_side(gen) == 0 ? 'B' : 'S';
+        m->trade_condition = 'R';
+        body_size = sizeof(TradeMsg);
+      } else if (mtype == 4) {
+        msg_hdr->msg_type = static_cast<uint8_t>(MarketDataType::QUOTE_BID);
+        QuoteBidMsg* m = reinterpret_cast<QuoteBidMsg*>(msg_hdr);
+        std::strncpy(m->market, MOCK_MARKETS[dist_market(gen)].c_str(), sizeof(m->market) - 1);
+        std::strncpy(m->instrument, MOCK_INSTRUMENTS[dist_instrument(gen)].c_str(), sizeof(m->instrument) - 1);
+        m->price = dist_price(gen);
+        m->quantity = dist_qty(gen);
+        m->num_orders = dist_qty(gen) / 50 + 1;
+        body_size = sizeof(QuoteBidMsg);
+      } else {
+        msg_hdr->msg_type = static_cast<uint8_t>(MarketDataType::QUOTE_ASK);
+        QuoteAskMsg* m = reinterpret_cast<QuoteAskMsg*>(msg_hdr);
+        std::strncpy(m->market, MOCK_MARKETS[dist_market(gen)].c_str(), sizeof(m->market) - 1);
+        std::strncpy(m->instrument, MOCK_INSTRUMENTS[dist_instrument(gen)].c_str(), sizeof(m->instrument) - 1);
+        m->price = dist_price(gen) + 0.10;
+        m->quantity = dist_qty(gen);
+        m->num_orders = dist_qty(gen) / 50 + 1;
+        body_size = sizeof(QuoteAskMsg);
+      }
+
+      size_t total_frame_size = sizeof(TcpResponse) + sizeof(MsgHdr) + body_size;
+
       // Build TcpResponse header
       TcpResponse resp;
-      resp.respLen = static_cast<uint16_t>(total_msg_len);
+      resp.respLen = static_cast<uint16_t>(total_frame_size);
       resp.respSeq = seq;
       std::memcpy(frame.data(), &resp, sizeof(TcpResponse));
 
@@ -435,7 +528,7 @@ int main(int argc, char *argv[]) {
       hdr.flags = 0;
       std::memcpy(frame.data() + sizeof(TcpResponse), &hdr, sizeof(MsgHdr));
 
-      if (!sendAll(client_fd, frame.data(), total_msg_len)) {
+      if (!sendAll(client_fd, frame.data(), total_frame_size)) {
         LOG_ERR("Send failed at seq %lu", seq);
         break;
       }

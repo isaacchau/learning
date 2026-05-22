@@ -460,6 +460,7 @@ int main(int argc, char *argv[]) {
         return 1;
       }
     } else {
+      int orig_i = i;
       if (!parseGlobalOption(argc, argv, i, config,
                              stats_interval_sec, pool_stats_interval_sec,
                              log_dir, log_stdout, log_file, log_syslog)) {
@@ -472,16 +473,16 @@ int main(int argc, char *argv[]) {
       // To catch unknowns, we verify the option was actually handled.
       // Simpler: check if it's a known global prefix.
       bool is_known_global =
-          strncmp(argv[i], "--workers", 9) == 0 ||
-          strncmp(argv[i], "--raw-queue", 11) == 0 ||
-          strncmp(argv[i], "--dec-queue", 11) == 0 ||
-          strncmp(argv[i], "--reconnect", 11) == 0 ||
-          strncmp(argv[i], "--queue-timeout", 15) == 0 ||
-          strncmp(argv[i], "--stats-interval", 16) == 0 ||
-          strncmp(argv[i], "--pool-stats", 12) == 0 ||
-          strncmp(argv[i], "--log", 5) == 0;
+          strncmp(argv[orig_i], "--workers", 9) == 0 ||
+          strncmp(argv[orig_i], "--raw-queue", 11) == 0 ||
+          strncmp(argv[orig_i], "--dec-queue", 11) == 0 ||
+          strncmp(argv[orig_i], "--reconnect", 11) == 0 ||
+          strncmp(argv[orig_i], "--queue-timeout", 15) == 0 ||
+          strncmp(argv[orig_i], "--stats-interval", 16) == 0 ||
+          strncmp(argv[orig_i], "--pool-stats", 12) == 0 ||
+          strncmp(argv[orig_i], "--log", 5) == 0;
       if (!is_known_global) {
-        fprintf(stderr, "Unknown option: %s\n", argv[i]);
+        fprintf(stderr, "Unknown option: %s\n", argv[orig_i]);
         printUsage(argv[0]);
         return 1;
       }

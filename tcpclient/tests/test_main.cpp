@@ -92,9 +92,9 @@ static int g_failed = 0;
 // Include files under test
 // ============================================================================
 
-#include "../lockfree_ringbuffer.h"
-#include "../shared_ptr_pool.h"
-#include "../protocol.h"
+#include "lockfree_ringbuffer.h"
+#include "shared_ptr_pool.h"
+#include "protocol.h"
 
 #include <thread>
 #include <atomic>
@@ -731,8 +731,8 @@ TEST(ringbuffer_push_pop_mixed) {
 // These test the INI configuration file parser.
 // ----------------------------------------------------------------------------
 
-#include "../config_parser.h"
-#include "../log_msg.h"
+#include "config_parser.h"
+#include "log_msg.h"
 #include <cstdio>
 
 TEST(config_parser_valid_file) {

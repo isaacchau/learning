@@ -4,75 +4,90 @@
 # These targets help check for memory leaks, security issues, and bugs.
 #
 # QUICK START:
-#   make asan    # Build with AddressSanitizer (memory leak/overflow detection)
-#   make tsan    # Build with ThreadSanitizer (race condition detection)
-#   make valgrind # Run under Valgrind (detailed leak analysis)
-#   make tidy    # Run clang-tidy (static analysis)
+#   make -f Makefile.analysis asan     # Build with AddressSanitizer (leak detection)
+#   make -f Makefile.analysis tsan     # Build with ThreadSanitizer (race detection)
+#   make -f Makefile.analysis valgrind # Run under Valgrind (leak analysis)
+#   make -f Makefile.analysis tidy     # Run clang-tidy (static analysis)
 #
 # ============================================================================
 
+# Directories and variables
+SRC_DIR = src
+BIN_DIR = bin
+
 # Sanitizer flags
-ASAN_FLAGS = -fsanitize=address -fno-omit-frame-pointer -g -O1
-TSAN_FLAGS = -fsanitize=thread -g -O1
+ASAN_FLAGS  = -fsanitize=address -fno-omit-frame-pointer -g -O1
+TSAN_FLAGS  = -fsanitize=thread -g -O1
 UBSAN_FLAGS = -fsanitize=undefined -g -O1
 
+# Include paths
+INC_FLAGS = -I$(SRC_DIR)/client -I$(SRC_DIR)/server -I$(SRC_DIR)/common
+
 # Sanitizer binaries
-TARGET_ASAN = msg_client_asan
-TARGET_TSAN = msg_client_tsan
-TARGET_UBSAN = msg_client_ubsan
+TARGET_ASAN  = $(BIN_DIR)/msg_client_asan
+TARGET_TSAN  = $(BIN_DIR)/msg_client_tsan
+TARGET_UBSAN = $(BIN_DIR)/msg_client_ubsan
 
 # Source files (same as main Makefile)
-CLIENT_SRCS = main.cpp msg_client.cpp log_msg.cpp config_parser.cpp
+CLIENT_SRCS = $(SRC_DIR)/client/main.cpp \
+              $(SRC_DIR)/client/msg_client.cpp \
+              $(SRC_DIR)/common/log_msg.cpp \
+              $(SRC_DIR)/client/config_parser.cpp \
+              $(SRC_DIR)/client/ini_parser.cpp
+
+.PHONY: asan tsan ubsan valgrind tidy scan check-all clean-analysis
 
 # AddressSanitizer - Memory leaks, buffer overflows, use-after-free
 asan:
 	@echo "Building with AddressSanitizer..."
-	$(CXX) -std=c++14 -faligned-new $(ASAN_FLAGS) -Wall -Wextra -pthread -I. \
+	@mkdir -p $(BIN_DIR)
+	$(CXX) -std=c++14 -faligned-new $(ASAN_FLAGS) -Wall -Wextra -pthread $(INC_FLAGS) \
 		$(CLIENT_SRCS) -o $(TARGET_ASAN) -pthread
 	@echo "Run with: ./$(TARGET_ASAN) [options]"
 	@echo "ASAN_OPTIONS=detect_leaks=1 ./$(TARGET_ASAN)"  
 
 # ThreadSanitizer - Data races
-# Note: TSan and ASan cannot be combined
 tsan:
 	@echo "Building with ThreadSanitizer..."
-	$(CXX) -std=c++14 -faligned-new $(TSAN_FLAGS) -Wall -Wextra -pthread -I. \
+	@mkdir -p $(BIN_DIR)
+	$(CXX) -std=c++14 -faligned-new $(TSAN_FLAGS) -Wall -Wextra -pthread $(INC_FLAGS) \
 		$(CLIENT_SRCS) -o $(TARGET_TSAN) -pthread
 	@echo "Run with: ./$(TARGET_TSAN) [options]"
 
 # UndefinedBehaviorSanitizer - Signed overflow, etc.
 ubsan:
 	@echo "Building with UndefinedBehaviorSanitizer..."
-	$(CXX) -std=c++14 -faligned-new $(UBSAN_FLAGS) -Wall -Wextra -pthread -I. \
+	@mkdir -p $(BIN_DIR)
+	$(CXX) -std=c++14 -faligned-new $(UBSAN_FLAGS) -Wall -Wextra -pthread $(INC_FLAGS) \
 		$(CLIENT_SRCS) -o $(TARGET_UBSAN) -pthread
 	@echo "Run with: ./$(TARGET_UBSAN) [options]"
 
 # Valgrind - Memory leak detection (run on normal binary)
-valgrind: msg_client
+valgrind: $(BIN_DIR)/msg_client
 	@echo "Running under Valgrind (press Ctrl+C to stop)..."
 	valgrind --leak-check=full \
 		--show-leak-kinds=all \
 		--track-origins=yes \
 		--log-file=valgrind.log \
-		./msg_client --host 127.0.0.1 --port 8888 || true
+		./$(BIN_DIR)/msg_client --host 127.0.0.1 --port 8888 || true
 	@echo "Log saved to valgrind.log"
 
 # clang-tidy - Static analysis with modern C++ checks
 tidy:
 	@echo "Running clang-tidy..."
 	clang-tidy $(CLIENT_SRCS) -- \
-		-std=c++14 -I. -D__linux__ 2>&1 | tee clang-tidy.log
+		-std=c++14 $(INC_FLAGS) -D__linux__ 2>&1 | tee clang-tidy.log
 
 # scan-build - Clang static analyzer
 scan:
 	@echo "Running Clang Static Analyzer..."
 	scan-build --use-analyzer=/usr/bin/clang \
 		-o scan-results \
-		make clean msg_client 2>&1 | tee scan-build.log
+		make clean all 2>&1 | tee scan-build.log
 	@echo "Report saved to scan-results/"
 
 # Run all checks (quick)
-check-all: check tidy
+check-all: tidy
 	@echo "All static checks completed"
 
 # Clean sanitizer binaries
@@ -80,5 +95,3 @@ clean-analysis:
 	rm -f $(TARGET_ASAN) $(TARGET_TSAN) $(TARGET_UBSAN)
 	rm -f valgrind.log clang-tidy.log scan-build.log
 	rm -rf scan-results/
-
-.PHONY: asan tsan ubsan valgrind tidy scan check-all clean-analysis
