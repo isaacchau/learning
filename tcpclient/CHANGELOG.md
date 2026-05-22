@@ -62,7 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Endpoint failover with exponential backoff and per-connection retry limits.
 - Sequence-number tracking for resume-on-reconnect.
 - Message dropping (rather than TCP backpressure) to protect the server.
-- JSON configuration file support (`config_parser.h/cpp`).
+- INI configuration file support (`config_parser.h/cpp`).
 - Custom minimal unit-test framework (`tests/test_main.cpp`).
 - Static analysis Makefile (`Makefile.analysis`) with ASan, TSan, UBSan, clang-tidy, and Valgrind targets.
 - Metrics aggregation pipeline (orders, trades, quotes) with CSV and InfluxDB Line output.

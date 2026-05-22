@@ -36,7 +36,7 @@ TARGET_SERVER = msg_test_server
 TARGET_DEBUG  = msg_client_debug
 
 # Source files
-CLIENT_SRCS = main.cpp msg_client.cpp log_msg.cpp config_parser.cpp
+CLIENT_SRCS = main.cpp msg_client.cpp log_msg.cpp config_parser.cpp ini_parser.cpp
 SERVER_SRCS = msg_test_server.cpp log_msg.cpp
 
 # Object files (Separate them to speed up recompilation!)
@@ -45,7 +45,7 @@ SERVER_OBJS = $(SERVER_SRCS:.cpp=.o)
 DEBUG_OBJS  = $(CLIENT_SRCS:.cpp=.dbg.o)
 
 # Headers for dependency tracking
-HEADERS  = lockfree_ringbuffer.h shared_ptr_pool.h protocol.h msg_client.h log_msg.h config_parser.h json.hpp \
+HEADERS  = lockfree_ringbuffer.h shared_ptr_pool.h protocol.h msg_client.h log_msg.h config_parser.h ini_parser.h \
            metrics.hpp market_data/message_types.h
 
 # Test files
@@ -113,7 +113,7 @@ test: $(TEST_BIN)
 	@./$(TEST_BIN)
 
 $(TEST_BIN): $(TEST_SRC) $(HEADERS)
-	$(CXX) $(CXXFLAGS_DEBUG) -I. $(TEST_SRC) config_parser.cpp log_msg.cpp msg_client.cpp -o $(TEST_BIN) $(LDFLAGS_DEBUG)
+	$(CXX) $(CXXFLAGS_DEBUG) -I. $(TEST_SRC) config_parser.cpp ini_parser.cpp log_msg.cpp msg_client.cpp -o $(TEST_BIN) $(LDFLAGS_DEBUG)
 
 # Clean test binaries too
 clean:

@@ -2,19 +2,19 @@
 // main.cpp — CLI entry point for msg_client
 // ============================================================================
 // Parses command-line arguments and environment variables, loads optional
-// JSON configuration, sets up signal handling, and runs the MsgClient.
+// INI configuration, sets up signal handling, and runs the MsgClient.
 //
 // Configuration hierarchy (highest to lowest precedence):
 //   1. Command-line arguments
 //   2. Environment variables (APP_TCP_CLIENT_*, APP_LOG_*)
-//   3. JSON configuration file (--config <file>)
+//   3. INI configuration file (--config <file>)
 //   4. Hardcoded defaults in msg_client.h
 //
 // Why this precedence order?
 //   - CLI args are most explicit (user typed them right now).
 //   - Environment variables allow container/orchestrator overrides without
 //     changing command lines.
-//   - JSON config files are version-controlled and shared across environments.
+//   - INI config files are version-controlled and shared across environments.
 //   - Defaults are the safety net.
 //
 // See doc/05_Build_and_Run.md for usage examples.
@@ -53,7 +53,7 @@ static void printUsage(const char *prog) {
           "Usage: %s [options] [connection ...]\n"
           "\n"
           "Options:\n"
-          "  --config <file>      JSON configuration file (optional)\n"
+          "  --config <file>      INI configuration file (optional)\n"
           "  --workers <num>      Worker thread count   (default: %zu)\n"
           "  --raw-queue <size>   Raw queue size        (default: %zu)\n"
           "  --dec-queue <size>   Decoded queue size    (default: %zu)\n"

@@ -1,57 +1,46 @@
 // ============================================================================
-// config_parser.cpp — JSON configuration file parser implementation
+// config_parser.cpp — INI configuration file parser implementation
 // ============================================================================
-// Wraps nlohmann/json (vendored single-header json.hpp) to load
-// MsgClientConfig from a JSON file.  See doc/05_Build_and_Run.md
-// for the JSON schema and examples.
+// Wraps the lightweight IniFile parser to load MsgClientConfig from an
+// INI-style file.  See doc/05_Build_and_Run.md for the INI schema.
 //
 // Validation strategy:
 //   - Structural validation (types, required fields) happens during parsing.
 //   - Semantic validation (ranges, consistency) happens in validateConfig()
 //     after the full config object is built.
 //   - This two-pass approach gives better error messages: we can report
-//     the exact JSON path that failed, not just a generic "invalid config".
-//
-// Why nlohmann/json?
-//   - Single-header, no build-system integration needed.
-//   - Modern C++ API (operator[], .get<T>()) that maps naturally to our structs.
-//   - Widely used, well-tested, and MIT licensed.
+//     the exact section/key that failed, not just a generic "invalid config".
 // ============================================================================
 
 #include "config_parser.h"
-#include "json.hpp"
+#include "ini_parser.h"
 #include "log_msg.h"
-// aggregation config is now part of msg_client.h
-#include <fstream>
-#include <sstream>
 #include <algorithm>
-
-using json = nlohmann::json;
 
 // Helper validation functions
 namespace {
-    
-    bool validateRange(const std::string& name, size_t value, size_t min, size_t max, 
+
+    bool validateRange(const std::string& name, size_t value, size_t min, size_t max,
                        std::string& error) {
         if (value < min || value > max) {
-            error = name + " must be between " + std::to_string(min) + 
+            error = name + " must be between " + std::to_string(min) +
                     " and " + std::to_string(max) + " (got " + std::to_string(value) + ")";
             return false;
         }
         return true;
     }
-    
-    bool validateRangeInt(const std::string& name, int value, int min, int max, 
+
+    bool validateRangeInt(const std::string& name, int value, int min, int max,
                           std::string& error) {
         if (value < min || value > max) {
-            error = name + " must be between " + std::to_string(min) + 
+            error = name + " must be between " + std::to_string(min) +
                     " and " + std::to_string(max) + " (got " + std::to_string(value) + ")";
             return false;
         }
         return true;
     }
-    
-    bool validateNotEmpty(const std::string& name, const std::string& value, 
+
+    bool validateNotEmpty(const std::string& name, const std::string& value,
                           std::string& error) {
         if (value.empty()) {
             error = name + " cannot be empty";
@@ -59,17 +48,17 @@ namespace {
         }
         return true;
     }
-    
-    bool validateMaxLength(const std::string& name, const std::string& value, 
+
+    bool validateMaxLength(const std::string& name, const std::string& value,
                            size_t max_len, std::string& error) {
         if (value.length() > max_len) {
-            error = name + " too long (max " + std::to_string(max_len) + 
+            error = name + " too long (max " + std::to_string(max_len) +
                     " chars, got " + std::to_string(value.length()) + ")";
             return false;
         }
         return true;
     }
-    
+
     // ------------------------------------------------------------------------
     // Global config validation
     // ------------------------------------------------------------------------
@@ -171,241 +160,109 @@ namespace {
     }
 
     // ------------------------------------------------------------------------
-    // Top-level JSON type validation
-    // ------------------------------------------------------------------------
-    bool validateTopLevelTypes(const json& j, std::string& error) {
-        if (j.contains("global") && !j["global"].is_object()) {
-            error = "'global' must be an object";
-            return false;
-        }
-        if (j.contains("connections") && !j["connections"].is_array()) {
-            error = "'connections' must be an array";
-            return false;
-        }
-        if (j.contains("memory_pool") && !j["memory_pool"].is_object()) {
-            error = "'memory_pool' must be an object";
-            return false;
-        }
-        return true;
-    }
-
-    // ------------------------------------------------------------------------
     // Parse global settings section
     // ------------------------------------------------------------------------
-    bool parseGlobalSection(const json& j, MsgClientConfig& config, std::string& error) {
-        if (!j.contains("global")) return true;
+    bool parseGlobalSection(const IniFile& ini, MsgClientConfig& config, std::string& /*error*/) {
+        if (ini.sectionCount("global") == 0) return true;
 
-        const auto& global = j["global"];
-        try {
-            if (global.contains("workers")) {
-                config.worker_thread_count = global["workers"].get<size_t>();
-            }
-            if (global.contains("raw_queue_size")) {
-                config.raw_queue_size = global["raw_queue_size"].get<size_t>();
-            }
-            if (global.contains("decoded_queue_size")) {
-                config.decoded_queue_size = global["decoded_queue_size"].get<size_t>();
-            }
-            if (global.contains("reconnect_interval_ms")) {
-                config.reconnect_interval_ms = global["reconnect_interval_ms"].get<int>();
-            }
-            if (global.contains("queue_push_timeout_ms")) {
-                config.queue_push_timeout_ms = global["queue_push_timeout_ms"].get<int>();
-            }
-        } catch (const json::type_error& e) {
-            error = std::string("Type error in 'global' section: ") + e.what();
-            return false;
+        if (ini.hasKey("global", 0, "workers")) {
+            config.worker_thread_count = ini.getSizeT("global", 0, "workers");
+        }
+        if (ini.hasKey("global", 0, "raw_queue_size")) {
+            config.raw_queue_size = ini.getSizeT("global", 0, "raw_queue_size");
+        }
+        if (ini.hasKey("global", 0, "decoded_queue_size")) {
+            config.decoded_queue_size = ini.getSizeT("global", 0, "decoded_queue_size");
+        }
+        if (ini.hasKey("global", 0, "reconnect_interval_ms")) {
+            config.reconnect_interval_ms = ini.getInt("global", 0, "reconnect_interval_ms");
+        }
+        if (ini.hasKey("global", 0, "queue_push_timeout_ms")) {
+            config.queue_push_timeout_ms = ini.getInt("global", 0, "queue_push_timeout_ms");
         }
         return true;
     }
-
-    // Forward declarations for connection parsing helpers
-    bool parseEndpointsArray(const json& endpoints, size_t conn_idx,
-                             ConnectionConfig& conn_config, std::string& error);
-    bool parseLegacyEndpoint(const json& conn, size_t conn_idx,
-                             ConnectionConfig& conn_config, std::string& error);
-    bool parseConnectionStringField(const json& conn, const char* field_name,
-                                    size_t conn_idx, std::string& out_value,
-                                    std::string& error);
-    bool parseSingleConnection(const json& conn, size_t conn_idx,
-                               ConnectionConfig& conn_config, std::string& error);
 
     // ------------------------------------------------------------------------
     // Parse connections section
     // ------------------------------------------------------------------------
-    bool parseConnectionsSection(const json& j, MsgClientConfig& config, std::string& error) {
-        if (!j.contains("connections")) return true;
+    bool parseConnectionsSection(const IniFile& ini, MsgClientConfig& config, std::string& error) {
+        size_t count = ini.sectionCount("connection");
+        for (size_t i = 0; i < count; ++i) {
+            ConnectionConfig conn_config;
 
-        const auto& connections = j["connections"];
-        for (size_t i = 0; i < connections.size(); ++i) {
-            const auto& conn = connections[i];
-
-            if (!conn.is_object()) {
-                error = "connections[" + std::to_string(i) + "] must be an object";
-                return false;
+            // Legacy single-endpoint format: host + port directly in [connection]
+            if (ini.hasKey("connection", i, "host")) {
+                std::string h = ini.getString("connection", i, "host");
+                int port_val = ini.getInt("connection", i, "port", Defaults::PORT);
+                if (!validateRangeInt("connections[" + std::to_string(i) + "].port",
+                                      port_val, Defaults::MIN_PORT, Defaults::MAX_PORT, error)) {
+                    return false;
+                }
+                conn_config.endpoints.push_back({h, static_cast<uint16_t>(port_val)});
             }
 
-            ConnectionConfig conn_config;
-            if (!parseSingleConnection(conn, i, conn_config, error)) return false;
+            // Multi-endpoint format: endpoints_host_N, endpoints_port_N
+            // (INI doesn't support nested arrays, so we use indexed keys)
+            for (size_t ep_idx = 0; ; ++ep_idx) {
+                std::string host_key = "endpoints_host_" + std::to_string(ep_idx);
+                std::string port_key = "endpoints_port_" + std::to_string(ep_idx);
+                if (!ini.hasKey("connection", i, host_key)) break;
+
+                std::string h = ini.getString("connection", i, host_key);
+                int port_val = ini.getInt("connection", i, port_key, Defaults::PORT);
+                if (!validateRangeInt("connections[" + std::to_string(i) + "].endpoints[" +
+                                      std::to_string(ep_idx) + "].port",
+                                      port_val, Defaults::MIN_PORT, Defaults::MAX_PORT, error)) {
+                    return false;
+                }
+                conn_config.endpoints.push_back({h, static_cast<uint16_t>(port_val)});
+            }
+
+            if (ini.hasKey("connection", i, "failover_retries")) {
+                conn_config.max_retries_per_endpoint = ini.getInt("connection", i, "failover_retries");
+            }
+
+            if (ini.hasKey("connection", i, "item")) {
+                conn_config.item_name = ini.getString("connection", i, "item");
+            }
+            if (ini.hasKey("connection", i, "client_id")) {
+                conn_config.client_id = ini.getString("connection", i, "client_id");
+            }
+            if (ini.hasKey("connection", i, "starting_seq")) {
+                conn_config.starting_seq_num = ini.getUint64("connection", i, "starting_seq");
+            }
+
             config.connections.push_back(conn_config);
         }
-        return true;
-    }
-
-    bool parseSingleConnection(const json& conn, size_t conn_idx,
-                               ConnectionConfig& conn_config, std::string& error) {
-        try {
-            auto it_endpoints = conn.find("endpoints");
-            if (it_endpoints != conn.end()) {
-                if (!parseEndpointsArray(*it_endpoints, conn_idx, conn_config, error)) return false;
-            }
-
-            if (conn_config.endpoints.empty()) {
-                if (!parseLegacyEndpoint(conn, conn_idx, conn_config, error)) return false;
-            }
-
-            auto it_failover = conn.find("failover_retries");
-            if (it_failover != conn.end()) {
-                conn_config.max_retries_per_endpoint = it_failover->get<int>();
-            }
-
-            if (!parseConnectionStringField(conn, "item", conn_idx, conn_config.item_name, error)) return false;
-            if (!parseConnectionStringField(conn, "client_id", conn_idx, conn_config.client_id, error)) return false;
-
-            auto it_seq = conn.find("starting_seq");
-            if (it_seq != conn.end()) {
-                conn_config.starting_seq_num = it_seq->get<uint64_t>();
-            }
-        } catch (const json::type_error& e) {
-            error = "Type error in connections[" + std::to_string(conn_idx) + "]: " + e.what();
-            return false;
-        }
-        return true;
-    }
-
-    bool parseEndpointsArray(const json& endpoints, size_t conn_idx,
-                             ConnectionConfig& conn_config, std::string& error) {
-        if (!endpoints.is_array()) {
-            error = "connections[" + std::to_string(conn_idx) + "].endpoints must be an array";
-            return false;
-        }
-        for (size_t j = 0; j < endpoints.size(); ++j) {
-            const auto& ep = endpoints[j];
-            if (!ep.is_object()) {
-                error = "connections[" + std::to_string(conn_idx) + "].endpoints[" +
-                       std::to_string(j) + "] must be an object";
-                return false;
-            }
-            EndpointConfig ep_cfg;
-            auto it_host = ep.find("host");
-            if (it_host != ep.end()) {
-                if (!it_host->is_string()) {
-                    error = "connections[" + std::to_string(conn_idx) + "].endpoints[" +
-                           std::to_string(j) + "].host must be a string";
-                    return false;
-                }
-                ep_cfg.host = it_host->get<std::string>();
-            }
-            auto it_port = ep.find("port");
-            if (it_port != ep.end()) {
-                int port_val = it_port->get<int>();
-                if (!validateRangeInt("connections[" + std::to_string(conn_idx) + "].endpoints[" +
-                                     std::to_string(j) + "].port",
-                                     port_val, Defaults::MIN_PORT, Defaults::MAX_PORT, error)) {
-                    return false;
-                }
-                ep_cfg.port = static_cast<uint16_t>(port_val);
-            }
-            conn_config.endpoints.push_back(ep_cfg);
-        }
-        return true;
-    }
-
-    bool parseLegacyEndpoint(const json& conn, size_t conn_idx,
-                             ConnectionConfig& conn_config, std::string& error) {
-        auto it_host = conn.find("host");
-        if (it_host != conn.end()) {
-            if (!it_host->is_string()) {
-                error = "connections[" + std::to_string(conn_idx) + "].host must be a string";
-                return false;
-            }
-            std::string h = it_host->get<std::string>();
-            uint16_t p = Defaults::PORT;
-            auto it_port = conn.find("port");
-            if (it_port != conn.end()) {
-                int port_val = it_port->get<int>();
-                if (!validateRangeInt("connections[" + std::to_string(conn_idx) + "].port",
-                                     port_val, Defaults::MIN_PORT, Defaults::MAX_PORT, error)) {
-                    return false;
-                }
-                p = static_cast<uint16_t>(port_val);
-            }
-            conn_config.endpoints.push_back({h, p});
-        }
-        return true;
-    }
-
-    bool parseConnectionStringField(const json& conn, const char* field_name,
-                                    size_t conn_idx, std::string& out_value,
-                                    std::string& error) {
-        auto it = conn.find(field_name);
-        if (it == conn.end()) return true;
-        if (!it->is_string()) {
-            error = "connections[" + std::to_string(conn_idx) + "]." + field_name + " must be a string";
-            return false;
-        }
-        out_value = it->get<std::string>();
         return true;
     }
 
     // ------------------------------------------------------------------------
     // Parse aggregation section
     // ------------------------------------------------------------------------
-    bool parseAggregationSection(const json& j, MsgClientConfig& config, std::string& error) {
-        if (!j.contains("aggregation")) return true;
+    bool parseAggregationSection(const IniFile& ini, MsgClientConfig& config, std::string& error) {
+        if (ini.sectionCount("aggregation") == 0) return true;
 
-        const auto& agg = j["aggregation"];
-        if (!agg.is_object()) {
-            error = "'aggregation' must be an object";
-            return false;
+        if (ini.hasKey("aggregation", 0, "enabled")) {
+            config.aggregation_config.enabled = ini.getBool("aggregation", 0, "enabled");
         }
-
-        try {
-            if (agg.contains("enabled")) {
-                config.aggregation_config.enabled = agg["enabled"].get<bool>();
+        if (ini.hasKey("aggregation", 0, "window_ms")) {
+            config.aggregation_config.window_ms = ini.getUint64("aggregation", 0, "window_ms");
+        }
+        if (ini.hasKey("aggregation", 0, "output_format")) {
+            std::string fmt = ini.getString("aggregation", 0, "output_format");
+            if (fmt == "csv" || fmt == "CSV") {
+                config.aggregation_config.output_format = metrics::OutputFormat::CSV;
+            } else {
+                config.aggregation_config.output_format = metrics::OutputFormat::INFLUXDB_LINE;
             }
-            if (agg.contains("window_ms")) {
-                config.aggregation_config.window_ms = agg["window_ms"].get<uint64_t>();
-            }
-            if (agg.contains("output_format")) {
-                if (!agg["output_format"].is_string()) {
-                    error = "aggregation.output_format must be a string";
-                    return false;
-                }
-                std::string fmt = agg["output_format"].get<std::string>();
-                if (fmt == "csv" || fmt == "CSV") {
-                    config.aggregation_config.output_format = metrics::OutputFormat::CSV;
-                } else {
-                    config.aggregation_config.output_format = metrics::OutputFormat::INFLUXDB_LINE;
-                }
-            }
-            if (agg.contains("output_dir")) {
-                if (!agg["output_dir"].is_string()) {
-                    error = "aggregation.output_dir must be a string";
-                    return false;
-                }
-                config.aggregation_config.output_dir = agg["output_dir"].get<std::string>();
-            }
-            if (agg.contains("filename_prefix")) {
-                if (!agg["filename_prefix"].is_string()) {
-                    error = "aggregation.filename_prefix must be a string";
-                    return false;
-                }
-                config.aggregation_config.filename_prefix = agg["filename_prefix"].get<std::string>();
-            }
-        } catch (const json::type_error& e) {
-            error = std::string("Type error in 'aggregation' section: ") + e.what();
-            return false;
+        }
+        if (ini.hasKey("aggregation", 0, "output_dir")) {
+            config.aggregation_config.output_dir = ini.getString("aggregation", 0, "output_dir");
+        }
+        if (ini.hasKey("aggregation", 0, "filename_prefix")) {
+            config.aggregation_config.filename_prefix = ini.getString("aggregation", 0, "filename_prefix");
         }
 
         std::string agg_error = config.aggregation_config.validate();
@@ -419,10 +276,18 @@ namespace {
     // ------------------------------------------------------------------------
     // Parse memory pool section
     // ------------------------------------------------------------------------
-    bool parseMemoryPoolSection(const json& j, MsgClientConfig& config, std::string& error) {
-        if (!j.contains("memory_pool")) return true;
+    bool parseMemoryPoolSection(const IniFile& ini, MsgClientConfig& config, std::string& /*error*/) {
+        // Check if any memory_pool.class_N sections exist
+        bool has_any = false;
+        for (size_t i = 0; i < MemoryPool::NUM_SIZE_CLASSES; ++i) {
+            std::string section = "memory_pool.class_" + std::to_string(i);
+            if (ini.sectionCount(section) > 0) {
+                has_any = true;
+                break;
+            }
+        }
+        if (!has_any) return true;
 
-        const auto& pool = j["memory_pool"];
         config.pool_config.clear();
 
         struct DefaultClass { size_t size; size_t initial; size_t max_free; size_t max_total; };
@@ -444,20 +309,16 @@ namespace {
             cfg.max_count = defaults[i].max_free;
             cfg.max_total_allocated = defaults[i].max_total;
 
-            std::string key = "class_" + std::to_string(i);
-            if (pool.contains(key)) {
-                const auto& cls = pool[key];
-                if (!cls.is_object()) {
-                    error = "memory_pool." + key + " must be an object";
-                    return false;
+            std::string section = "memory_pool.class_" + std::to_string(i);
+            if (ini.sectionCount(section) > 0) {
+                if (ini.hasKey(section, 0, "initial")) {
+                    cfg.initial_count = ini.getSizeT(section, 0, "initial");
                 }
-                try {
-                    if (cls.contains("initial")) cfg.initial_count = cls["initial"].get<size_t>();
-                    if (cls.contains("max_free")) cfg.max_count = cls["max_free"].get<size_t>();
-                    if (cls.contains("max_total")) cfg.max_total_allocated = cls["max_total"].get<size_t>();
-                } catch (const json::type_error& e) {
-                    error = "Type error in memory_pool." + key + ": " + e.what();
-                    return false;
+                if (ini.hasKey(section, 0, "max_free")) {
+                    cfg.max_count = ini.getSizeT(section, 0, "max_free");
+                }
+                if (ini.hasKey(section, 0, "max_total")) {
+                    cfg.max_total_allocated = ini.getSizeT(section, 0, "max_total");
                 }
             }
             config.pool_config.push_back(cfg);
@@ -469,32 +330,17 @@ namespace {
 bool parseConfigFile(const std::string& filepath,
                      MsgClientConfig& config,
                      std::string& error_message) {
-    // Read file
-    std::ifstream file(filepath);
-    if (!file.is_open()) {
-        error_message = "Cannot open config file: " + filepath;
-        return false;
-    }
-
-    // Parse JSON
-    json j;
-    try {
-        file >> j;
-    } catch (const json::parse_error& e) {
-        error_message = std::string("JSON parse error: ") + e.what();
-        return false;
-    }
-
-    // Validate top-level JSON types before parsing
-    if (!validateTopLevelTypes(j, error_message)) {
+    // Parse INI file
+    IniFile ini;
+    if (!ini.parseFile(filepath, error_message)) {
         return false;
     }
 
     // Parse each section
-    if (!parseGlobalSection(j, config, error_message)) return false;
-    if (!parseConnectionsSection(j, config, error_message)) return false;
-    if (!parseAggregationSection(j, config, error_message)) return false;
-    if (!parseMemoryPoolSection(j, config, error_message)) return false;
+    if (!parseGlobalSection(ini, config, error_message)) return false;
+    if (!parseConnectionsSection(ini, config, error_message)) return false;
+    if (!parseAggregationSection(ini, config, error_message)) return false;
+    if (!parseMemoryPoolSection(ini, config, error_message)) return false;
 
     // Final validation of the complete configuration
     if (!validateConfig(config, error_message)) {
@@ -506,51 +352,50 @@ bool parseConfigFile(const std::string& filepath,
 
 void printConfigFormat() {
     printf(
-        "Configuration File Format (JSON):\n"
-        "=================================\n"
+        "Configuration File Format (INI):\n"
+        "================================\n"
         "\n"
-        "{\n"
-        "  // Global settings\n"
-        "  \"global\": {\n"
-        "    \"workers\": 4,                    // Number of worker threads (1-64)\n"
-        "    \"raw_queue_size\": 16384,         // Raw queue size (64-1048576)\n"
-        "    \"decoded_queue_size\": 16384,     // Decoded queue per worker (64-1048576)\n"
-        "    \"reconnect_interval_ms\": 3000,   // Reconnect interval (100-300000)\n"
-        "    \"queue_push_timeout_ms\": 5       // Queue push timeout (-1-60000)\n"
-        "  },\n"
+        "; Global settings\n"
+        "[global]\n"
+        "workers = 4                    ; Number of worker threads (1-64)\n"
+        "raw_queue_size = 16384         ; Raw queue size (64-1048576)\n"
+        "decoded_queue_size = 16384     ; Decoded queue per worker (64-1048576)\n"
+        "reconnect_interval_ms = 3000   ; Reconnect interval (100-300000)\n"
+        "queue_push_timeout_ms = 5      ; Queue push timeout (-1-60000)\n"
         "\n"
-        "  // TCP connections (up to 64)\n"
-        "  \"connections\": [\n"
-        "    {\n"
-        "      // Multi-endpoint with failover (new format)\n"
-        "      \"endpoints\": [\n"
-        "        {\"host\": \"primary.example.com\", \"port\": 8888},\n"
-        "        {\"host\": \"backup.example.com\",  \"port\": 8888}\n"
-        "      ],\n"
-        "      \"failover_retries\": 2,          // Retries before failover\n"
-        "      \"item\": \"AAPL\",              // Item name (max 32 chars)\n"
-        "      \"client_id\": \"Client1\",      // Client ID (max 32 chars)\n"
-        "      \"starting_seq\": 0             // Starting sequence number\n"
-        "    },\n"
-        "    {\n"
-        "      // Single endpoint (legacy format, still supported)\n"
-        "      \"host\": \"server2.example.com\",\n"
-        "      \"port\": 8889,\n"
-        "      \"item\": \"MSFT\",\n"
-        "      \"client_id\": \"Client2\",\n"
-        "      \"starting_seq\": 0\n"
-        "    }\n"
-        "  ],\n"
+        "; TCP connections (up to 64, repeat [connection] for each)\n"
+        "[connection]\n"
+        "host = primary.example.com     ; Server host (legacy single-endpoint)\n"
+        "port = 8888                    ; Server port\n"
+        "failover_retries = 2           ; Retries before failover\n"
+        "item = AAPL                    ; Item name (max 32 chars)\n"
+        "client_id = Client1            ; Client ID (max 32 chars)\n"
+        "starting_seq = 0               ; Starting sequence number\n"
         "\n"
-        "  // Optional: Memory pool tuning\n"
-        "  \"memory_pool\": {\n"
-        "    \"class_5\": {                    // 64KB class (recv buffers)\n"
-        "      \"initial\": 512,               // <= max_total\n"
-        "      \"max_free\": 1024,             // <= max_total\n"
-        "      \"max_total\": 8192             // Maximum allocations\n"
-        "    }\n"
-        "  }\n"
-        "}\n"
+        "; Multi-endpoint connection (alternative to host/port above)\n"
+        "[connection]\n"
+        "endpoints_host_0 = primary.example.com\n"
+        "endpoints_port_0 = 8888\n"
+        "endpoints_host_1 = backup.example.com\n"
+        "endpoints_port_1 = 8889\n"
+        "failover_retries = 2\n"
+        "item = AAPL\n"
+        "client_id = Client1\n"
+        "starting_seq = 0\n"
+        "\n"
+        "; Optional: Aggregation settings\n"
+        "[aggregation]\n"
+        "enabled = true\n"
+        "window_ms = 1000\n"
+        "output_format = csv            ; csv or influxdb_line\n"
+        "output_dir = /tmp/metrics\n"
+        "filename_prefix = agg\n"
+        "\n"
+        "; Optional: Memory pool tuning (override specific classes)\n"
+        "[memory_pool.class_5]          ; 64KB class (recv buffers)\n"
+        "initial = 512                  ; <= max_total\n"
+        "max_free = 1024                ; <= max_total\n"
+        "max_total = 8192               ; Maximum allocations\n"
         "\n"
         "All fields are optional. Missing fields use defaults.\n"
         "Connections can also be specified via command line.\n"

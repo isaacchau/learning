@@ -26,9 +26,9 @@ Welcome! This documentation is designed for developers who haven't used C++ in a
 | File | Responsibility |
 |------|----------------|
 | `msg_client.h` / `msg_client.cpp` | Core client class, connection management, three-stage thread lifecycle, statistics |
-| `main.cpp` | CLI parsing, environment-variable overrides, JSON config loading, signal handling, stats printing loop |
+| `main.cpp` | CLI parsing, environment-variable overrides, INI config loading, signal handling, stats printing loop |
 | `msg_test_server.cpp` | Interactive test server with keyboard rate controls (`u`/`d`/`o`/`q`) |
-| `config_parser.h` / `config_parser.cpp` | JSON configuration file parsing using `json.hpp` |
+| `config_parser.h` / `config_parser.cpp` | INI configuration file parsing (zero external dependencies) |
 | `protocol.h` | Packed wire-format structs (`TcpRequest`, `TcpResponse`, `MsgHdr`) and internal pipeline types (`RawMessage`, `SubMessage`) |
 | `lockfree_ringbuffer.h` | Templated SPSC lock-free ring buffer with progressive spin-backoff |
 | `shared_ptr_pool.h` | Size-class memory pool (`MemoryPool`) and `Buffer` with custom `shared_ptr` deleters |
@@ -36,7 +36,7 @@ Welcome! This documentation is designed for developers who haven't used C++ in a
 | `metrics.hpp` / `metrics_demo.cpp` | Time-bucketed metrics aggregation library with CSV and InfluxDB Line output |
 | `market_data/message_types.h` | Market data message structs (orders, trades, quotes) for the aggregation pipeline |
 | `tests/test_main.cpp` | Custom minimal unit-test framework and test cases |
-| `json.hpp` | Vendored single-header JSON library (nlohmann/json) |
+| `ini_parser.h` / `ini_parser.cpp` | Hand-written INI file parser (replaces vendored `json.hpp`) |
 | `Makefile` | GNU Make build system: release, debug, test, demo, format, check targets |
 | `Makefile.analysis` | Static and dynamic analysis targets: ASan, TSan, UBSan, clang-tidy, Valgrind |
 

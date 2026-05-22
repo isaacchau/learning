@@ -728,7 +728,7 @@ TEST(ringbuffer_push_pop_mixed) {
 // ----------------------------------------------------------------------------
 // Config Parser Tests
 // ----------------------------------------------------------------------------
-// These test the JSON configuration file parser.
+// These test the INI configuration file parser.
 // ----------------------------------------------------------------------------
 
 #include "../config_parser.h"
@@ -737,26 +737,21 @@ TEST(ringbuffer_push_pop_mixed) {
 
 TEST(config_parser_valid_file) {
     // Create a temporary valid config file
-    const char* tmpfile = "/tmp/test_config_valid.json";
+    const char* tmpfile = "/tmp/test_config_valid.ini";
     FILE* f = std::fopen(tmpfile, "w");
     ASSERT_TRUE(f != nullptr);
-    std::fprintf(f, "{\n");
-    std::fprintf(f, "  \"global\": {\n");
-    std::fprintf(f, "    \"workers\": 4,\n");
-    std::fprintf(f, "    \"raw_queue_size\": 1024,\n");
-    std::fprintf(f, "    \"decoded_queue_size\": 1024,\n");
-    std::fprintf(f, "    \"reconnect_interval_ms\": 2000,\n");
-    std::fprintf(f, "    \"queue_push_timeout_ms\": 10\n");
-    std::fprintf(f, "  },\n");
-    std::fprintf(f, "  \"connections\": [\n");
-    std::fprintf(f, "    {\n");
-    std::fprintf(f, "      \"host\": \"127.0.0.1\",\n");
-    std::fprintf(f, "      \"port\": 8888,\n");
-    std::fprintf(f, "      \"item\": \"TEST_ITEM\",\n");
-    std::fprintf(f, "      \"client_id\": \"TestClient\"\n");
-    std::fprintf(f, "    }\n");
-    std::fprintf(f, "  ]\n");
-    std::fprintf(f, "}\n");
+    std::fprintf(f, "[global]\n");
+    std::fprintf(f, "workers = 4\n");
+    std::fprintf(f, "raw_queue_size = 1024\n");
+    std::fprintf(f, "decoded_queue_size = 1024\n");
+    std::fprintf(f, "reconnect_interval_ms = 2000\n");
+    std::fprintf(f, "queue_push_timeout_ms = 10\n");
+    std::fprintf(f, "\n");
+    std::fprintf(f, "[connection]\n");
+    std::fprintf(f, "host = 127.0.0.1\n");
+    std::fprintf(f, "port = 8888\n");
+    std::fprintf(f, "item = TEST_ITEM\n");
+    std::fprintf(f, "client_id = TestClient\n");
     std::fclose(f);
     
     MsgClientConfig config;
@@ -782,18 +777,18 @@ TEST(config_parser_valid_file) {
 TEST(config_parser_missing_file) {
     MsgClientConfig config;
     std::string error;
-    bool result = parseConfigFile("/tmp/nonexistent_config_12345.json", config, error);
+    bool result = parseConfigFile("/tmp/nonexistent_config_12345.ini", config, error);
     
     ASSERT_FALSE(result);
     ASSERT_TRUE(!error.empty());
     return true;
 }
 
-TEST(config_parser_invalid_json) {
-    const char* tmpfile = "/tmp/test_config_invalid.json";
+TEST(config_parser_invalid_ini) {
+    const char* tmpfile = "/tmp/test_config_invalid.ini";
     FILE* f = std::fopen(tmpfile, "w");
     ASSERT_TRUE(f != nullptr);
-    std::fprintf(f, "this is not json {\n");
+    std::fprintf(f, "this is not valid ini = missing section\n");
     std::fclose(f);
     
     MsgClientConfig config;
@@ -808,10 +803,11 @@ TEST(config_parser_invalid_json) {
 }
 
 TEST(config_parser_empty_connections) {
-    const char* tmpfile = "/tmp/test_config_empty.json";
+    const char* tmpfile = "/tmp/test_config_empty.ini";
     FILE* f = std::fopen(tmpfile, "w");
     ASSERT_TRUE(f != nullptr);
-    std::fprintf(f, "{\"connections\": []}\n");
+    std::fprintf(f, "[global]\n");
+    std::fprintf(f, "workers = 2\n");
     std::fclose(f);
     
     MsgClientConfig config;
@@ -827,13 +823,17 @@ TEST(config_parser_empty_connections) {
 }
 
 TEST(config_parser_workers_out_of_range) {
-    const char* tmpfile = "/tmp/test_config_workers.json";
+    const char* tmpfile = "/tmp/test_config_workers.ini";
     FILE* f = std::fopen(tmpfile, "w");
     ASSERT_TRUE(f != nullptr);
-    std::fprintf(f, "{\n");
-    std::fprintf(f, "  \"global\": {\"workers\": 100},\n");
-    std::fprintf(f, "  \"connections\": [{\"host\":\"127.0.0.1\",\"port\":8888,\"item\":\"x\",\"client_id\":\"c\"}]\n");
-    std::fprintf(f, "}\n");
+    std::fprintf(f, "[global]\n");
+    std::fprintf(f, "workers = 100\n");
+    std::fprintf(f, "\n");
+    std::fprintf(f, "[connection]\n");
+    std::fprintf(f, "host = 127.0.0.1\n");
+    std::fprintf(f, "port = 8888\n");
+    std::fprintf(f, "item = x\n");
+    std::fprintf(f, "client_id = c\n");
     std::fclose(f);
     
     MsgClientConfig config;
@@ -848,12 +848,14 @@ TEST(config_parser_workers_out_of_range) {
 }
 
 TEST(config_parser_port_out_of_range) {
-    const char* tmpfile = "/tmp/test_config_port.json";
+    const char* tmpfile = "/tmp/test_config_port.ini";
     FILE* f = std::fopen(tmpfile, "w");
     ASSERT_TRUE(f != nullptr);
-    std::fprintf(f, "{\n");
-    std::fprintf(f, "  \"connections\": [{\"host\":\"127.0.0.1\",\"port\":99999,\"item\":\"x\",\"client_id\":\"c\"}]\n");
-    std::fprintf(f, "}\n");
+    std::fprintf(f, "[connection]\n");
+    std::fprintf(f, "host = 127.0.0.1\n");
+    std::fprintf(f, "port = 99999\n");
+    std::fprintf(f, "item = x\n");
+    std::fprintf(f, "client_id = c\n");
     std::fclose(f);
     
     MsgClientConfig config;
@@ -868,21 +870,16 @@ TEST(config_parser_port_out_of_range) {
 }
 
 TEST(config_parser_multi_endpoint) {
-    const char* tmpfile = "/tmp/test_config_multi.json";
+    const char* tmpfile = "/tmp/test_config_multi.ini";
     FILE* f = std::fopen(tmpfile, "w");
     ASSERT_TRUE(f != nullptr);
-    std::fprintf(f, "{\n");
-    std::fprintf(f, "  \"connections\": [\n");
-    std::fprintf(f, "    {\n");
-    std::fprintf(f, "      \"endpoints\": [\n");
-    std::fprintf(f, "        {\"host\": \"primary.example.com\", \"port\": 8888},\n");
-    std::fprintf(f, "        {\"host\": \"backup.example.com\", \"port\": 8889}\n");
-    std::fprintf(f, "      ],\n");
-    std::fprintf(f, "      \"item\": \"AAPL\",\n");
-    std::fprintf(f, "      \"client_id\": \"Client1\"\n");
-    std::fprintf(f, "    }\n");
-    std::fprintf(f, "  ]\n");
-    std::fprintf(f, "}\n");
+    std::fprintf(f, "[connection]\n");
+    std::fprintf(f, "endpoints_host_0 = primary.example.com\n");
+    std::fprintf(f, "endpoints_port_0 = 8888\n");
+    std::fprintf(f, "endpoints_host_1 = backup.example.com\n");
+    std::fprintf(f, "endpoints_port_1 = 8889\n");
+    std::fprintf(f, "item = AAPL\n");
+    std::fprintf(f, "client_id = Client1\n");
     std::fclose(f);
     
     MsgClientConfig config;
@@ -902,15 +899,19 @@ TEST(config_parser_multi_endpoint) {
 }
 
 TEST(config_parser_memory_pool) {
-    const char* tmpfile = "/tmp/test_config_pool.json";
+    const char* tmpfile = "/tmp/test_config_pool.ini";
     FILE* f = std::fopen(tmpfile, "w");
     ASSERT_TRUE(f != nullptr);
-    std::fprintf(f, "{\n");
-    std::fprintf(f, "  \"connections\": [{\"host\":\"127.0.0.1\",\"port\":8888,\"item\":\"x\",\"client_id\":\"c\"}],\n");
-    std::fprintf(f, "  \"memory_pool\": {\n");
-    std::fprintf(f, "    \"class_0\": {\"initial\": 10, \"max_free\": 20, \"max_total\": 50}\n");
-    std::fprintf(f, "  }\n");
-    std::fprintf(f, "}\n");
+    std::fprintf(f, "[connection]\n");
+    std::fprintf(f, "host = 127.0.0.1\n");
+    std::fprintf(f, "port = 8888\n");
+    std::fprintf(f, "item = x\n");
+    std::fprintf(f, "client_id = c\n");
+    std::fprintf(f, "\n");
+    std::fprintf(f, "[memory_pool.class_0]\n");
+    std::fprintf(f, "initial = 10\n");
+    std::fprintf(f, "max_free = 20\n");
+    std::fprintf(f, "max_total = 50\n");
     std::fclose(f);
     
     MsgClientConfig config;
@@ -928,19 +929,21 @@ TEST(config_parser_memory_pool) {
 }
 
 TEST(config_parser_aggregation) {
-    const char* tmpfile = "/tmp/test_config_agg.json";
+    const char* tmpfile = "/tmp/test_config_agg.ini";
     FILE* f = std::fopen(tmpfile, "w");
     ASSERT_TRUE(f != nullptr);
-    std::fprintf(f, "{\n");
-    std::fprintf(f, "  \"connections\": [{\"host\":\"127.0.0.1\",\"port\":8888,\"item\":\"x\",\"client_id\":\"c\"}],\n");
-    std::fprintf(f, "  \"aggregation\": {\n");
-    std::fprintf(f, "    \"enabled\": true,\n");
-    std::fprintf(f, "    \"window_ms\": 5000,\n");
-    std::fprintf(f, "    \"output_format\": \"csv\",\n");
-    std::fprintf(f, "    \"output_dir\": \"/tmp/output\",\n");
-    std::fprintf(f, "    \"filename_prefix\": \"test\"\n");
-    std::fprintf(f, "  }\n");
-    std::fprintf(f, "}\n");
+    std::fprintf(f, "[connection]\n");
+    std::fprintf(f, "host = 127.0.0.1\n");
+    std::fprintf(f, "port = 8888\n");
+    std::fprintf(f, "item = x\n");
+    std::fprintf(f, "client_id = c\n");
+    std::fprintf(f, "\n");
+    std::fprintf(f, "[aggregation]\n");
+    std::fprintf(f, "enabled = true\n");
+    std::fprintf(f, "window_ms = 5000\n");
+    std::fprintf(f, "output_format = csv\n");
+    std::fprintf(f, "output_dir = /tmp/output\n");
+    std::fprintf(f, "filename_prefix = test\n");
     std::fclose(f);
     
     MsgClientConfig config;
@@ -1213,7 +1216,7 @@ TEST(pool_multiple_allocations_same_size) {
 // ----------------------------------------------------------------------------
 
 TEST(config_parser_empty_file) {
-    const char* tmpfile = "/tmp/test_config_empty_file.json";
+    const char* tmpfile = "/tmp/test_config_empty_file.ini";
     FILE* f = std::fopen(tmpfile, "w");
     ASSERT_TRUE(f != nullptr);
     std::fclose(f);  // Empty file
@@ -1230,7 +1233,7 @@ TEST(config_parser_empty_file) {
 }
 
 TEST(config_parser_null_fields) {
-    const char* tmpfile = "/tmp/test_config_null.json";
+    const char* tmpfile = "/tmp/test_config_null.ini";
     FILE* f = std::fopen(tmpfile, "w");
     ASSERT_TRUE(f != nullptr);
     std::fprintf(f, "{\n");
@@ -1250,7 +1253,7 @@ TEST(config_parser_null_fields) {
 }
 
 TEST(config_parser_negative_port) {
-    const char* tmpfile = "/tmp/test_config_neg_port.json";
+    const char* tmpfile = "/tmp/test_config_neg_port.ini";
     FILE* f = std::fopen(tmpfile, "w");
     ASSERT_TRUE(f != nullptr);
     std::fprintf(f, "{\n");
@@ -1270,7 +1273,7 @@ TEST(config_parser_negative_port) {
 }
 
 TEST(config_parser_zero_workers) {
-    const char* tmpfile = "/tmp/test_config_zero_workers.json";
+    const char* tmpfile = "/tmp/test_config_zero_workers.ini";
     FILE* f = std::fopen(tmpfile, "w");
     ASSERT_TRUE(f != nullptr);
     std::fprintf(f, "{\n");
@@ -1291,7 +1294,7 @@ TEST(config_parser_zero_workers) {
 }
 
 TEST(config_parser_too_many_connections) {
-    const char* tmpfile = "/tmp/test_config_too_many.json";
+    const char* tmpfile = "/tmp/test_config_too_many.ini";
     FILE* f = std::fopen(tmpfile, "w");
     ASSERT_TRUE(f != nullptr);
     std::fprintf(f, "{\"connections\": [\n");
@@ -1316,7 +1319,7 @@ TEST(config_parser_too_many_connections) {
 }
 
 TEST(config_parser_long_item_name) {
-    const char* tmpfile = "/tmp/test_config_long_item.json";
+    const char* tmpfile = "/tmp/test_config_long_item.ini";
     FILE* f = std::fopen(tmpfile, "w");
     ASSERT_TRUE(f != nullptr);
     std::fprintf(f, "{\n");
@@ -1336,7 +1339,7 @@ TEST(config_parser_long_item_name) {
 }
 
 TEST(config_parser_long_client_id) {
-    const char* tmpfile = "/tmp/test_config_long_id.json";
+    const char* tmpfile = "/tmp/test_config_long_id.ini";
     FILE* f = std::fopen(tmpfile, "w");
     ASSERT_TRUE(f != nullptr);
     std::fprintf(f, "{\n");
@@ -1357,10 +1360,14 @@ TEST(config_parser_long_client_id) {
 
 TEST(config_parser_default_values) {
     // Config with only required fields - should use defaults for everything else
-    const char* tmpfile = "/tmp/test_config_defaults.json";
+    const char* tmpfile = "/tmp/test_config_defaults.ini";
     FILE* f = std::fopen(tmpfile, "w");
     ASSERT_TRUE(f != nullptr);
-    std::fprintf(f, "{\"connections\": [{\"host\":\"127.0.0.1\",\"port\":8888,\"item\":\"x\",\"client_id\":\"c\"}]}\n");
+    std::fprintf(f, "[connection]\n");
+    std::fprintf(f, "host = 127.0.0.1\n");
+    std::fprintf(f, "port = 8888\n");
+    std::fprintf(f, "item = x\n");
+    std::fprintf(f, "client_id = c\n");
     std::fclose(f);
 
     MsgClientConfig config;
@@ -1380,13 +1387,17 @@ TEST(config_parser_default_values) {
 
 TEST(config_parser_invalid_pool_class_index) {
     // Pool config with invalid class index (class_8 doesn't exist)
-    const char* tmpfile = "/tmp/test_config_pool_bad.json";
+    const char* tmpfile = "/tmp/test_config_pool_bad.ini";
     FILE* f = std::fopen(tmpfile, "w");
     ASSERT_TRUE(f != nullptr);
-    std::fprintf(f, "{\n");
-    std::fprintf(f, "  \"connections\": [{\"host\":\"127.0.0.1\",\"port\":8888,\"item\":\"x\",\"client_id\":\"c\"}],\n");
-    std::fprintf(f, "  \"memory_pool\": {\"class_8\": {\"initial\": 10}}\n");
-    std::fprintf(f, "}\n");
+    std::fprintf(f, "[connection]\n");
+    std::fprintf(f, "host = 127.0.0.1\n");
+    std::fprintf(f, "port = 8888\n");
+    std::fprintf(f, "item = x\n");
+    std::fprintf(f, "client_id = c\n");
+    std::fprintf(f, "\n");
+    std::fprintf(f, "[memory_pool.class_8]\n");
+    std::fprintf(f, "initial = 10\n");
     std::fclose(f);
 
     MsgClientConfig config;
@@ -1394,9 +1405,9 @@ TEST(config_parser_invalid_pool_class_index) {
     bool result = parseConfigFile(tmpfile, config, error);
 
     // class_8 is silently ignored (only class_0..7 are processed)
-    // but the config should still parse successfully with defaults
+    // INI parser doesn't auto-populate pool_config, so it stays empty
     ASSERT_TRUE(result);
-    ASSERT_EQ(8, config.pool_config.size());
+    ASSERT_EQ(0, config.pool_config.size());
 
     std::remove(tmpfile);
     return true;
@@ -1912,14 +1923,19 @@ TEST(ringbuffer_zero_capacity) {
 // ----------------------------------------------------------------------------
 
 TEST(config_parser_duplicate_keys) {
-    // JSON with duplicate keys (nlohmann/json keeps last value)
-    const char* tmpfile = "/tmp/test_config_dup.json";
+    // INI with duplicate keys (last value wins)
+    const char* tmpfile = "/tmp/test_config_dup.ini";
     FILE* f = std::fopen(tmpfile, "w");
     ASSERT_TRUE(f != nullptr);
-    std::fprintf(f, "{\n");
-    std::fprintf(f, "  \"connections\": [{\"host\":\"127.0.0.1\",\"port\":8888,\"item\":\"x\",\"client_id\":\"c\"}],\n");
-    std::fprintf(f, "  \"global\": {\"workers\": 2, \"workers\": 4}\n");
-    std::fprintf(f, "}\n");
+    std::fprintf(f, "[global]\n");
+    std::fprintf(f, "workers = 2\n");
+    std::fprintf(f, "workers = 4\n");
+    std::fprintf(f, "\n");
+    std::fprintf(f, "[connection]\n");
+    std::fprintf(f, "host = 127.0.0.1\n");
+    std::fprintf(f, "port = 8888\n");
+    std::fprintf(f, "item = x\n");
+    std::fprintf(f, "client_id = c\n");
     std::fclose(f);
 
     MsgClientConfig config;
@@ -1927,7 +1943,7 @@ TEST(config_parser_duplicate_keys) {
     bool result = parseConfigFile(tmpfile, config, error);
 
     ASSERT_TRUE(result);
-    // nlohmann/json keeps the last value for duplicate keys
+    // INI keeps the last value for duplicate keys
     ASSERT_EQ(4, config.worker_thread_count);
 
     std::remove(tmpfile);
@@ -1936,10 +1952,13 @@ TEST(config_parser_duplicate_keys) {
 
 TEST(config_parser_missing_required_fields) {
     // Connection missing 'item' field - parser uses default "default"
-    const char* tmpfile = "/tmp/test_config_missing_item.json";
+    const char* tmpfile = "/tmp/test_config_missing_item.ini";
     FILE* f = std::fopen(tmpfile, "w");
     ASSERT_TRUE(f != nullptr);
-    std::fprintf(f, "{\"connections\": [{\"host\":\"127.0.0.1\",\"port\":8888,\"client_id\":\"c\"}]}\n");
+    std::fprintf(f, "[connection]\n");
+    std::fprintf(f, "host = 127.0.0.1\n");
+    std::fprintf(f, "port = 8888\n");
+    std::fprintf(f, "client_id = c\n");
     std::fclose(f);
 
     MsgClientConfig config;
@@ -1956,10 +1975,13 @@ TEST(config_parser_missing_required_fields) {
 
 TEST(config_parser_missing_required_port) {
     // Connection missing 'port' field (should use default)
-    const char* tmpfile = "/tmp/test_config_missing_port.json";
+    const char* tmpfile = "/tmp/test_config_missing_port.ini";
     FILE* f = std::fopen(tmpfile, "w");
     ASSERT_TRUE(f != nullptr);
-    std::fprintf(f, "{\"connections\": [{\"host\":\"127.0.0.1\",\"item\":\"x\",\"client_id\":\"c\"}]}\n");
+    std::fprintf(f, "[connection]\n");
+    std::fprintf(f, "host = 127.0.0.1\n");
+    std::fprintf(f, "item = x\n");
+    std::fprintf(f, "client_id = c\n");
     std::fclose(f);
 
     MsgClientConfig config;
@@ -1975,7 +1997,7 @@ TEST(config_parser_missing_required_port) {
 
 TEST(config_parser_aggregation_invalid_window) {
     // Aggregation with window_ms = 0 should fail validation
-    const char* tmpfile = "/tmp/test_config_agg_bad.json";
+    const char* tmpfile = "/tmp/test_config_agg_bad.ini";
     FILE* f = std::fopen(tmpfile, "w");
     ASSERT_TRUE(f != nullptr);
     std::fprintf(f, "{\n");
@@ -1997,13 +2019,18 @@ TEST(config_parser_aggregation_invalid_window) {
 
 TEST(config_parser_aggregation_disabled_no_validation) {
     // Disabled aggregation should not validate window_ms
-    const char* tmpfile = "/tmp/test_config_agg_disabled.json";
+    const char* tmpfile = "/tmp/test_config_agg_disabled.ini";
     FILE* f = std::fopen(tmpfile, "w");
     ASSERT_TRUE(f != nullptr);
-    std::fprintf(f, "{\n");
-    std::fprintf(f, "  \"connections\": [{\"host\":\"127.0.0.1\",\"port\":8888,\"item\":\"x\",\"client_id\":\"c\"}],\n");
-    std::fprintf(f, "  \"aggregation\": {\"enabled\": false, \"window_ms\": 0}\n");
-    std::fprintf(f, "}\n");
+    std::fprintf(f, "[connection]\n");
+    std::fprintf(f, "host = 127.0.0.1\n");
+    std::fprintf(f, "port = 8888\n");
+    std::fprintf(f, "item = x\n");
+    std::fprintf(f, "client_id = c\n");
+    std::fprintf(f, "\n");
+    std::fprintf(f, "[aggregation]\n");
+    std::fprintf(f, "enabled = false\n");
+    std::fprintf(f, "window_ms = 0\n");
     std::fclose(f);
 
     MsgClientConfig config;
@@ -2019,7 +2046,7 @@ TEST(config_parser_aggregation_disabled_no_validation) {
 
 TEST(config_parser_invalid_type_workers) {
     // workers as string instead of number
-    const char* tmpfile = "/tmp/test_config_bad_type.json";
+    const char* tmpfile = "/tmp/test_config_bad_type.ini";
     FILE* f = std::fopen(tmpfile, "w");
     ASSERT_TRUE(f != nullptr);
     std::fprintf(f, "{\n");
@@ -2040,7 +2067,7 @@ TEST(config_parser_invalid_type_workers) {
 }
 
 TEST(config_parser_whitespace_only_file) {
-    const char* tmpfile = "/tmp/test_config_ws.json";
+    const char* tmpfile = "/tmp/test_config_ws.ini";
     FILE* f = std::fopen(tmpfile, "w");
     ASSERT_TRUE(f != nullptr);
     std::fprintf(f, "   \n\t\n   \n");
@@ -2069,7 +2096,7 @@ TEST(config_parser_print_format_no_crash) {
 }
 
 TEST(config_parser_empty_host_string) {
-    const char* tmpfile = "/tmp/test_config_empty_host.json";
+    const char* tmpfile = "/tmp/test_config_empty_host.ini";
     FILE* f = std::fopen(tmpfile, "w");
     ASSERT_TRUE(f != nullptr);
     std::fprintf(f, "{\"connections\": [{\"host\":\"\",\"port\":8888,\"item\":\"x\",\"client_id\":\"c\"}]}\n");
@@ -2087,7 +2114,7 @@ TEST(config_parser_empty_host_string) {
 }
 
 TEST(config_parser_missing_host) {
-    const char* tmpfile = "/tmp/test_config_missing_host.json";
+    const char* tmpfile = "/tmp/test_config_missing_host.ini";
     FILE* f = std::fopen(tmpfile, "w");
     ASSERT_TRUE(f != nullptr);
     std::fprintf(f, "{\"connections\": [{\"port\":8888,\"item\":\"x\",\"client_id\":\"c\"}]}\n");
@@ -2106,13 +2133,19 @@ TEST(config_parser_missing_host) {
 }
 
 TEST(config_parser_invalid_agg_format) {
-    const char* tmpfile = "/tmp/test_config_agg_fmt.json";
+    const char* tmpfile = "/tmp/test_config_agg_fmt.ini";
     FILE* f = std::fopen(tmpfile, "w");
     ASSERT_TRUE(f != nullptr);
-    std::fprintf(f, "{\n");
-    std::fprintf(f, "  \"connections\": [{\"host\":\"127.0.0.1\",\"port\":8888,\"item\":\"x\",\"client_id\":\"c\"}],\n");
-    std::fprintf(f, "  \"aggregation\": {\"enabled\": true, \"window_ms\": 1000, \"output_format\": \"xml\"}\n");
-    std::fprintf(f, "}\n");
+    std::fprintf(f, "[connection]\n");
+    std::fprintf(f, "host = 127.0.0.1\n");
+    std::fprintf(f, "port = 8888\n");
+    std::fprintf(f, "item = x\n");
+    std::fprintf(f, "client_id = c\n");
+    std::fprintf(f, "\n");
+    std::fprintf(f, "[aggregation]\n");
+    std::fprintf(f, "enabled = true\n");
+    std::fprintf(f, "window_ms = 1000\n");
+    std::fprintf(f, "output_format = xml\n");
     std::fclose(f);
 
     MsgClientConfig config;
@@ -2128,7 +2161,7 @@ TEST(config_parser_invalid_agg_format) {
 }
 
 TEST(config_parser_reconnect_interval_negative) {
-    const char* tmpfile = "/tmp/test_config_neg_reconn.json";
+    const char* tmpfile = "/tmp/test_config_neg_reconn.ini";
     FILE* f = std::fopen(tmpfile, "w");
     ASSERT_TRUE(f != nullptr);
     std::fprintf(f, "{\n");
