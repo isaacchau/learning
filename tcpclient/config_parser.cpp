@@ -74,27 +74,16 @@ namespace {
     // Global config validation
     // ------------------------------------------------------------------------
     bool validateGlobalSettings(const MsgClientConfig& config, std::string& error) {
-        if (!validateRange("workers", config.worker_thread_count,
-                           Defaults::MIN_WORKER_THREADS, Defaults::MAX_WORKER_THREADS, error)) {
-            return false;
-        }
-        if (!validateRange("raw_queue_size", config.raw_queue_size,
-                           Defaults::MIN_QUEUE_SIZE, Defaults::MAX_QUEUE_SIZE, error)) {
-            return false;
-        }
-        if (!validateRange("decoded_queue_size", config.decoded_queue_size,
-                           Defaults::MIN_QUEUE_SIZE, Defaults::MAX_QUEUE_SIZE, error)) {
-            return false;
-        }
-        if (!validateRangeInt("reconnect_interval_ms", config.reconnect_interval_ms,
-                              Defaults::MIN_RECONNECT_MS, Defaults::MAX_RECONNECT_MS, error)) {
-            return false;
-        }
-        if (!validateRangeInt("queue_push_timeout_ms", config.queue_push_timeout_ms,
-                              Defaults::MIN_QUEUE_PUSH_TIMEOUT_MS, Defaults::MAX_QUEUE_PUSH_TIMEOUT_MS, error)) {
-            return false;
-        }
-        return true;
+        return validateRange("workers", config.worker_thread_count,
+                             Defaults::MIN_WORKER_THREADS, Defaults::MAX_WORKER_THREADS, error)
+            && validateRange("raw_queue_size", config.raw_queue_size,
+                             Defaults::MIN_QUEUE_SIZE, Defaults::MAX_QUEUE_SIZE, error)
+            && validateRange("decoded_queue_size", config.decoded_queue_size,
+                             Defaults::MIN_QUEUE_SIZE, Defaults::MAX_QUEUE_SIZE, error)
+            && validateRangeInt("reconnect_interval_ms", config.reconnect_interval_ms,
+                                Defaults::MIN_RECONNECT_MS, Defaults::MAX_RECONNECT_MS, error)
+            && validateRangeInt("queue_push_timeout_ms", config.queue_push_timeout_ms,
+                                Defaults::MIN_QUEUE_PUSH_TIMEOUT_MS, Defaults::MAX_QUEUE_PUSH_TIMEOUT_MS, error);
     }
 
     // ------------------------------------------------------------------------

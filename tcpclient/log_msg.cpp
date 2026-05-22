@@ -185,20 +185,22 @@ struct LogMsg::Impl {
         auto time_point = std::chrono::system_clock::time_point(std::chrono::milliseconds(e.timestamp_ms));
         auto r_t = std::chrono::system_clock::to_time_t(time_point);
         auto ms = e.timestamp_ms % 1000;
-        
+
         char tstr[64];
         std::strftime(tstr, sizeof(tstr), "%Y-%m-%d %H:%M:%S", std::localtime(&r_t));
-        
+
         char full_msg[1024];
-        snprintf(full_msg, sizeof(full_msg), "[%s.%03d] [%-6s] [TID:%llu] %s", 
+        snprintf(full_msg, sizeof(full_msg), "[%s.%03d] [%-6s] [TID:%llu] %s",
                  tstr, (int)ms, getLevelStr(e.level), (unsigned long long)e.thread_id, e.msg);
-                 
-        if (e.channels & CH_STDOUT) {
-            if (is_interactive) {
-                fprintf(stdout, "%s\n", full_msg);
-            }
+
+        writeToChannels(e, full_msg);
+    }
+
+    void writeToChannels(const LogEntry& e, const char* full_msg) {
+        if ((e.channels & CH_STDOUT) && is_interactive) {
+            fprintf(stdout, "%s\n", full_msg);
         }
-        if (e.channels & CH_FILE && log_file) {
+        if ((e.channels & CH_FILE) && log_file) {
             fprintf(log_file, "%s\n", full_msg);
         }
         if (e.channels & CH_SYSLOG) {

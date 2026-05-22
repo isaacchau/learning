@@ -2057,6 +2057,221 @@ TEST(config_parser_whitespace_only_file) {
     return true;
 }
 
+
+// ----------------------------------------------------------------------------
+// Additional Edge Case Tests — Phase 3
+// ----------------------------------------------------------------------------
+
+TEST(config_parser_print_format_no_crash) {
+    // printConfigFormat should not crash
+    printConfigFormat();
+    return true;
+}
+
+TEST(config_parser_empty_host_string) {
+    const char* tmpfile = "/tmp/test_config_empty_host.json";
+    FILE* f = std::fopen(tmpfile, "w");
+    ASSERT_TRUE(f != nullptr);
+    std::fprintf(f, "{\"connections\": [{\"host\":\"\",\"port\":8888,\"item\":\"x\",\"client_id\":\"c\"}]}\n");
+    std::fclose(f);
+
+    MsgClientConfig config;
+    std::string error;
+    bool result = parseConfigFile(tmpfile, config, error);
+
+    ASSERT_FALSE(result);
+    ASSERT_TRUE(!error.empty());
+
+    std::remove(tmpfile);
+    return true;
+}
+
+TEST(config_parser_missing_host) {
+    const char* tmpfile = "/tmp/test_config_missing_host.json";
+    FILE* f = std::fopen(tmpfile, "w");
+    ASSERT_TRUE(f != nullptr);
+    std::fprintf(f, "{\"connections\": [{\"port\":8888,\"item\":\"x\",\"client_id\":\"c\"}]}\n");
+    std::fclose(f);
+
+    MsgClientConfig config;
+    std::string error;
+    bool result = parseConfigFile(tmpfile, config, error);
+
+    // Should fail validation because host is missing/empty
+    ASSERT_FALSE(result);
+    ASSERT_TRUE(!error.empty());
+
+    std::remove(tmpfile);
+    return true;
+}
+
+TEST(config_parser_invalid_agg_format) {
+    const char* tmpfile = "/tmp/test_config_agg_fmt.json";
+    FILE* f = std::fopen(tmpfile, "w");
+    ASSERT_TRUE(f != nullptr);
+    std::fprintf(f, "{\n");
+    std::fprintf(f, "  \"connections\": [{\"host\":\"127.0.0.1\",\"port\":8888,\"item\":\"x\",\"client_id\":\"c\"}],\n");
+    std::fprintf(f, "  \"aggregation\": {\"enabled\": true, \"window_ms\": 1000, \"output_format\": \"xml\"}\n");
+    std::fprintf(f, "}\n");
+    std::fclose(f);
+
+    MsgClientConfig config;
+    std::string error;
+    bool result = parseConfigFile(tmpfile, config, error);
+
+    // Unknown format falls back to INFLUXDB_LINE, config parses successfully
+    ASSERT_TRUE(result);
+    ASSERT_EQ(metrics::OutputFormat::INFLUXDB_LINE, config.aggregation_config.output_format);
+
+    std::remove(tmpfile);
+    return true;
+}
+
+TEST(config_parser_reconnect_interval_negative) {
+    const char* tmpfile = "/tmp/test_config_neg_reconn.json";
+    FILE* f = std::fopen(tmpfile, "w");
+    ASSERT_TRUE(f != nullptr);
+    std::fprintf(f, "{\n");
+    std::fprintf(f, "  \"global\": {\"reconnect_interval_ms\": -1},\n");
+    std::fprintf(f, "  \"connections\": [{\"host\":\"127.0.0.1\",\"port\":8888,\"item\":\"x\",\"client_id\":\"c\"}]\n");
+    std::fprintf(f, "}\n");
+    std::fclose(f);
+
+    MsgClientConfig config;
+    std::string error;
+    bool result = parseConfigFile(tmpfile, config, error);
+
+    ASSERT_FALSE(result);
+    ASSERT_TRUE(!error.empty());
+
+    std::remove(tmpfile);
+    return true;
+}
+
+TEST(pool_exact_size_class_boundaries) {
+    // Allocate exactly at each size class boundary
+    MemoryPool pool;
+    size_t boundaries[] = {64, 256, 1024, 4096, 16384, 65536, 131072, 262144};
+    for (size_t s : boundaries) {
+        auto buf = pool.allocate(s);
+        ASSERT_TRUE(buf != nullptr);
+        ASSERT_TRUE(buf->capacity >= s);
+        // Verify we can write at the exact boundary
+        buf->data[s - 1] = 0x42;
+        ASSERT_EQ(0x42, buf->data[s - 1]);
+    }
+    return true;
+}
+
+TEST(pool_allocate_one_byte_under_boundary) {
+    // Allocate one byte under each boundary - should use the same class
+    MemoryPool pool;
+    size_t sizes[] = {63, 255, 1023, 4095, 16383, 65535, 131071, 262143};
+    for (size_t s : sizes) {
+        auto buf = pool.allocate(s);
+        ASSERT_TRUE(buf != nullptr);
+        ASSERT_TRUE(buf->capacity >= s);
+        buf->data[s - 1] = 0x42;
+        ASSERT_EQ(0x42, buf->data[s - 1]);
+    }
+    return true;
+}
+
+TEST(ringbuffer_push_wait_success_concurrent) {
+    // push_wait should succeed when space is freed by a concurrent pop
+    LockFreeRingBuffer<int> rb(2);
+    ASSERT_TRUE(rb.push(1));
+    ASSERT_TRUE(rb.push(2));  // Full
+
+    std::atomic<bool> popped{false};
+    std::thread consumer([&]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        int val;
+        bool ok = rb.pop(val);
+        popped.store(ok, std::memory_order_relaxed);
+    });
+
+    // push_wait with 100ms timeout should succeed after consumer pops
+    bool pushed = rb.push_wait(3, 100);
+    consumer.join();
+    ASSERT_TRUE(popped.load(std::memory_order_relaxed));
+    ASSERT_TRUE(pushed);
+    return true;
+}
+
+TEST(ringbuffer_pop_wait_success_concurrent) {
+    // pop_wait should succeed when item is pushed by a concurrent producer
+    LockFreeRingBuffer<int> rb(2);
+
+    std::atomic<bool> pushed{false};
+    std::thread producer([&]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        bool ok = rb.push(42);
+        pushed.store(ok, std::memory_order_relaxed);
+    });
+
+    // pop_wait with 100ms timeout should succeed after producer pushes
+    int val = 0;
+    bool popped = rb.pop_wait(val, 100);
+    producer.join();
+    ASSERT_TRUE(pushed.load(std::memory_order_relaxed));
+    ASSERT_TRUE(popped);
+    ASSERT_EQ(42, val);
+    return true;
+}
+
+TEST(protocol_tcp_request_raw_buffer_layout) {
+    // Verify TcpRequest can be safely manipulated via raw byte buffer
+    ASSERT_EQ(76, sizeof(TcpRequest));
+    char raw[sizeof(TcpRequest)];
+    std::memset(raw, 0, sizeof(raw));
+    TcpRequest* req = reinterpret_cast<TcpRequest*>(raw);
+    req->reqKey = getMagicKey();
+    std::memcpy(req->reqItem, "TEST_ITEM", 9);
+    req->lastRespSeq = 123456789ULL;
+    std::memcpy(req->clientID, "MY_CLIENT", 9);
+    ASSERT_EQ(getMagicKey(), req->reqKey);
+    ASSERT_EQ(123456789ULL, req->lastRespSeq);
+    ASSERT_EQ('T', req->reqItem[0]);
+    ASSERT_EQ('M', req->clientID[0]);
+    return true;
+}
+
+TEST(protocol_msg_hdr_flag_combinations) {
+    // Test various flag combinations
+    MsgHdr hdr;
+    hdr.msgSeqNum = 1;
+    hdr.timestamp = 0;
+    hdr.flags = 0x0001;
+    ASSERT_EQ(0x0001, hdr.flags);
+    hdr.flags = 0x00FF;
+    ASSERT_EQ(0x00FF, hdr.flags);
+    hdr.flags = 0xFF00;
+    ASSERT_EQ(0xFF00, hdr.flags);
+    hdr.flags = 0xAAAA;
+    ASSERT_EQ(0xAAAA, hdr.flags);
+    hdr.flags = 0x5555;
+    ASSERT_EQ(0x5555, hdr.flags);
+    return true;
+}
+
+TEST(config_validate_queue_push_timeout_out_of_range) {
+    MsgClientConfig config;
+    config.addConnection("127.0.0.1", 8888, "test_item");
+    config.queue_push_timeout_ms = 60001;  // Above MAX_QUEUE_PUSH_TIMEOUT_MS
+    std::string err = config.validate();
+    ASSERT_TRUE(!err.empty());
+    return true;
+}
+
+TEST(config_validate_queue_push_timeout_negative) {
+    MsgClientConfig config;
+    config.addConnection("127.0.0.1", 8888, "test_item");
+    config.queue_push_timeout_ms = -2;  // Below MIN_QUEUE_PUSH_TIMEOUT_MS (-1)
+    std::string err = config.validate();
+    ASSERT_TRUE(!err.empty());
+    return true;
+}
 // ============================================================================
 // Main Test Runner
 // ============================================================================

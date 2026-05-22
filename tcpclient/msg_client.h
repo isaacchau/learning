@@ -288,6 +288,9 @@ struct MsgClientConfig {
 
     // Validate entire configuration
     std::string validate() const;
+
+    // Helper for queue size validation (extracted for readability)
+    static std::string validateQueueSize(const char* name, size_t size);
 };
 
 // ============================================================================
@@ -493,6 +496,9 @@ private:
     // Failover
     void advanceToNextEndpoint(size_t conn_idx);
     void handleConnectFailure(size_t conn_idx, const char* reason);
+
+    // Constructor helpers (extracted for readability)
+    void clampWorkerCount();
 
     // Configuration
     MsgClientConfig config_;

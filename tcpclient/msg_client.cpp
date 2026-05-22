@@ -39,6 +39,18 @@
 #include <chrono>
 
 // ============================================================================
+// Environment Helpers
+// ============================================================================
+// Extracted from constructor to reduce nesting and improve reusability.
+// ============================================================================
+
+static int getEnvInt(const char* name, int def) {
+    const char* val = std::getenv(name);
+    if (val) { try { return std::stoi(val); } catch (...) {} }
+    return def;
+}
+
+// ============================================================================
 // ConnectionConfig Validation
 // ============================================================================
 // Validates user-supplied connection settings before they are used.
@@ -111,13 +123,13 @@ std::string MsgClientConfig::validate() const {
     if (connections.empty()) {
         return "At least one connection must be configured";
     }
-    
+
     // Maximum connections
     if (connections.size() > Defaults::MAX_CONNECTIONS) {
-        return "Too many connections (max " + std::to_string(Defaults::MAX_CONNECTIONS) + 
+        return "Too many connections (max " + std::to_string(Defaults::MAX_CONNECTIONS) +
                ", got " + std::to_string(connections.size()) + ")";
     }
-    
+
     // Validate each connection
     for (size_t i = 0; i < connections.size(); ++i) {
         std::string err = connections[i].validate();
@@ -125,45 +137,47 @@ std::string MsgClientConfig::validate() const {
             return "Connection[" + std::to_string(i) + "]: " + err;
         }
     }
-    
+
     // Worker thread count validation
-    if (worker_thread_count < Defaults::MIN_WORKER_THREADS || 
+    if (worker_thread_count < Defaults::MIN_WORKER_THREADS ||
         worker_thread_count > Defaults::MAX_WORKER_THREADS) {
-        return "Worker thread count must be between " + 
-               std::to_string(Defaults::MIN_WORKER_THREADS) + " and " + 
+        return "Worker thread count must be between " +
+               std::to_string(Defaults::MIN_WORKER_THREADS) + " and " +
                std::to_string(Defaults::MAX_WORKER_THREADS);
     }
-    
+
     // Queue size validation
-    if (raw_queue_size < Defaults::MIN_QUEUE_SIZE || 
-        raw_queue_size > Defaults::MAX_QUEUE_SIZE) {
-        return "Raw queue size must be between " + 
-               std::to_string(Defaults::MIN_QUEUE_SIZE) + " and " + 
-               std::to_string(Defaults::MAX_QUEUE_SIZE);
-    }
-    if (decoded_queue_size < Defaults::MIN_QUEUE_SIZE || 
-        decoded_queue_size > Defaults::MAX_QUEUE_SIZE) {
-        return "Decoded queue size must be between " + 
-               std::to_string(Defaults::MIN_QUEUE_SIZE) + " and " + 
-               std::to_string(Defaults::MAX_QUEUE_SIZE);
-    }
-    
+    std::string queue_err = validateQueueSize("Raw", raw_queue_size);
+    if (!queue_err.empty()) return queue_err;
+
+    queue_err = validateQueueSize("Decoded", decoded_queue_size);
+    if (!queue_err.empty()) return queue_err;
+
     // Reconnect interval validation
-    if (reconnect_interval_ms < Defaults::MIN_RECONNECT_MS || 
+    if (reconnect_interval_ms < Defaults::MIN_RECONNECT_MS ||
         reconnect_interval_ms > Defaults::MAX_RECONNECT_MS) {
-        return "Reconnect interval must be between " + 
-               std::to_string(Defaults::MIN_RECONNECT_MS) + " and " + 
+        return "Reconnect interval must be between " +
+               std::to_string(Defaults::MIN_RECONNECT_MS) + " and " +
                std::to_string(Defaults::MAX_RECONNECT_MS) + " ms";
     }
-    
+
     // Queue push timeout validation (-1 is valid for no-wait)
-    if (queue_push_timeout_ms < Defaults::MIN_QUEUE_PUSH_TIMEOUT_MS || 
+    if (queue_push_timeout_ms < Defaults::MIN_QUEUE_PUSH_TIMEOUT_MS ||
         queue_push_timeout_ms > Defaults::MAX_QUEUE_PUSH_TIMEOUT_MS) {
-        return "Queue push timeout must be between " + 
-               std::to_string(Defaults::MIN_QUEUE_PUSH_TIMEOUT_MS) + " and " + 
+        return "Queue push timeout must be between " +
+               std::to_string(Defaults::MIN_QUEUE_PUSH_TIMEOUT_MS) + " and " +
                std::to_string(Defaults::MAX_QUEUE_PUSH_TIMEOUT_MS) + " ms";
     }
-    
+
+    return "";
+}
+
+std::string MsgClientConfig::validateQueueSize(const char* name, size_t size) {
+    if (size < Defaults::MIN_QUEUE_SIZE || size > Defaults::MAX_QUEUE_SIZE) {
+        return std::string(name) + " queue size must be between " +
+               std::to_string(Defaults::MIN_QUEUE_SIZE) + " and " +
+               std::to_string(Defaults::MAX_QUEUE_SIZE);
+    }
     return "";
 }
 
@@ -209,23 +223,14 @@ MsgClient::MsgClient(const MsgClientConfig& config)
     , epoll_fd_(-1)
 {
     // Cache environment-derived constants once at construction
-    auto getEnvInt = [](const char* name, int def) -> int {
-        const char* val = std::getenv(name);
-        if (val) { try { return std::stoi(val); } catch (...) {} }
-        return def;
-    };
     recv_buffer_size_ = getRecvBufferSize();
     tcp_keepidle_     = getEnvInt("TCP_KEEPIDLE", 10);
     tcp_keepintvl_    = getEnvInt("TCP_KEEPINTVL", 3);
     tcp_keepcnt_      = getEnvInt("TCP_KEEPCNT", 3);
     tcp_rcvbuf_       = getEnvInt("APP_TCP_SO_RCVBUF", 2097152);
+
     // Clamp worker count
-    if (config_.worker_thread_count < Defaults::MIN_WORKER_THREADS) {
-        config_.worker_thread_count = Defaults::MIN_WORKER_THREADS;
-    }
-    if (config_.worker_thread_count > Defaults::MAX_WORKER_THREADS) {
-        config_.worker_thread_count = Defaults::MAX_WORKER_THREADS;
-    }
+    clampWorkerCount();
 
     // Create connection states
     connections_.reserve(config_.connections.size());
@@ -303,6 +308,19 @@ void MsgClient::initAggregationComponents() {
 
 MsgClient::~MsgClient() {
     stop();
+}
+
+// ============================================================================
+// Constructor Helpers
+// ============================================================================
+
+void MsgClient::clampWorkerCount() {
+    if (config_.worker_thread_count < Defaults::MIN_WORKER_THREADS) {
+        config_.worker_thread_count = Defaults::MIN_WORKER_THREADS;
+    }
+    if (config_.worker_thread_count > Defaults::MAX_WORKER_THREADS) {
+        config_.worker_thread_count = Defaults::MAX_WORKER_THREADS;
+    }
 }
 
 // ============================================================================
@@ -930,27 +948,28 @@ bool MsgClient::processRecvData(
             return false;
         }
         buf_used = 0;
-    } else {
-        size_t remaining = buf_used - parse_pos;
-        if (remaining > 0) {
-            auto new_buf = pool_->allocate(recv_buffer_size_);
-            if (!new_buf) {
-                LOG_ERR("[MsgClient][Conn %zu] Failed to allocate buffer for partial data", conn_idx);
-                return false;
-            }
-            std::memcpy(new_buf->data, buf_data + parse_pos, remaining);
-            buf_ref = std::move(new_buf);
-            buf_used = remaining;
-        } else {
-            buf_ref = pool_->allocate(recv_buffer_size_);
-            if (!buf_ref) {
-                LOG_ERR("[MsgClient][Conn %zu] Failed to allocate fresh receive buffer", conn_idx);
-                return false;
-            }
-            buf_used = 0;
-        }
+        return true;
     }
 
+    size_t remaining = buf_used - parse_pos;
+    if (remaining > 0) {
+        auto new_buf = pool_->allocate(recv_buffer_size_);
+        if (!new_buf) {
+            LOG_ERR("[MsgClient][Conn %zu] Failed to allocate buffer for partial data", conn_idx);
+            return false;
+        }
+        std::memcpy(new_buf->data, buf_data + parse_pos, remaining);
+        buf_ref = std::move(new_buf);
+        buf_used = remaining;
+        return true;
+    }
+
+    buf_ref = pool_->allocate(recv_buffer_size_);
+    if (!buf_ref) {
+        LOG_ERR("[MsgClient][Conn %zu] Failed to allocate fresh receive buffer", conn_idx);
+        return false;
+    }
+    buf_used = 0;
     return true;
 }
 
