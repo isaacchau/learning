@@ -73,8 +73,17 @@ inline uint32_t getMagicKey() {
     return key;
 }
 
-static const size_t MIN_MSG_LEN = sizeof(TcpResponse) + sizeof(MsgHdr); // 24
-static const size_t MAX_MSG_LEN = 65535;
+// ============================================================================
+// Protocol constants and limits
+// ============================================================================
+
+namespace ProtocolLimits {
+    constexpr size_t MIN_MSG_LEN = sizeof(TcpResponse) + sizeof(MsgHdr); // 24
+    constexpr size_t MAX_MSG_LEN = 65535;
+}
+
+using ProtocolLimits::MIN_MSG_LEN;
+using ProtocolLimits::MAX_MSG_LEN;
 
 // Application receive buffer size (configurable via APP_TCP_RECV_BUFFER_SIZE env var).
 // Default: 65536 (64KB). Must be >= MAX_MSG_LEN.

@@ -379,19 +379,29 @@ void MsgClient::stop() {
     // which breaks the IO thread out of its blocking call.
     closeAllSockets();
 
+    shutdownEpoll();
+    joinThreadsInOrder();
+    flushAndStopAggregators();
+}
+
+// ============================================================================
+// Shutdown Helpers (extracted from stop() for readability)
+// ============================================================================
+
+void MsgClient::shutdownEpoll() {
     // Close epoll_fd to wake up epoll_wait immediately (it will return EBADF).
     // We must join the IO thread BEFORE closing the fd to avoid a TSAN-reported
     // race between epoll_wait (reading fd) and close (invalidating fd).
     // In practice the race is benign (epoll_wait returns EBADF), but joining
     // first keeps sanitizers happy and is formally correct.
     int epoll_fd_local = epoll_fd_.exchange(-1);
+    joinThread(io_thread_);
     if (epoll_fd_local >= 0) {
-        joinThread(io_thread_);
         ::close(epoll_fd_local);
-    } else {
-        joinThread(io_thread_);
     }
+}
 
+void MsgClient::joinThreadsInOrder() {
     // Join order: IO → decoder → workers (producer-to-consumer).
     //
     // Why this order?
@@ -407,7 +417,9 @@ void MsgClient::stop() {
         joinThread(t);
     }
     worker_threads_.clear();
+}
 
+void MsgClient::flushAndStopAggregators() {
     // Flush aggregators AFTER workers finish (no new data can arrive).
     // Stop disk writer only after all data is enqueued.
     if (orders_aggregator_) orders_aggregator_->forceFlush();
@@ -1202,8 +1214,8 @@ void MsgClient::workerLoop(size_t worker_index) {
 // Aggregation Message Processing
 // ============================================================================
 // Extracted from workerLoop() to reduce its length and nesting depth.
-// This helper routes a decoded message to the appropriate aggregator
-// based on its market-data type.  No logic changes — pure refactoring.
+// Each market-data type has its own handler for clarity.
+// No logic changes — pure refactoring.
 //
 // Why castMessage<> instead of direct reinterpret_cast?
 //   - castMessage validates the body length is large enough for the struct.
@@ -1221,87 +1233,99 @@ void MsgClient::processAggregationMessage(const SubMessage& msg) {
     uint64_t ts_ns = hdr->timestamp_ns;
 
     switch (msg_type) {
-        case MarketDataType::ORDER_NEW: {
-            const auto* m = castMessage<OrderNewMsg>(msg.body, msg.body_length);
-            if (m) {
-                metrics::TagSet tags;
-                tags.add("Market", m->getMarket());
-                tags.add("Instrument", m->getInstrument());
-                tags.add("Broker", m->getBroker());
-                orders_aggregator_->add(tags, "newOrders", static_cast<int64_t>(1), ts_ns);
-                orders_aggregator_->add(tags, "openOrders", static_cast<int64_t>(1), ts_ns);
-                orders_aggregator_->add(tags, "totalOrderQty", static_cast<int64_t>(m->quantity), ts_ns);
-                orders_aggregator_->onIncomingTimestamp(ts_ns);
-            }
+        case MarketDataType::ORDER_NEW:
+            processOrderNew(msg, ts_ns);
             break;
-        }
-        case MarketDataType::ORDER_UPDATE: {
-            const auto* m = castMessage<OrderUpdateMsg>(msg.body, msg.body_length);
-            if (m) {
-                metrics::TagSet tags;
-                tags.add("Market", m->getMarket());
-                tags.add("Instrument", m->getInstrument());
-                tags.add("Broker", m->getBroker());
-                orders_aggregator_->add(tags, "modifiedOrders", static_cast<int64_t>(1), ts_ns);
-                orders_aggregator_->onIncomingTimestamp(ts_ns);
-            }
+        case MarketDataType::ORDER_UPDATE:
+            processOrderUpdate(msg, ts_ns);
             break;
-        }
-        case MarketDataType::ORDER_CANCEL: {
-            const auto* m = castMessage<OrderCancelMsg>(msg.body, msg.body_length);
-            if (m) {
-                metrics::TagSet tags;
-                tags.add("Market", m->getMarket());
-                tags.add("Instrument", m->getInstrument());
-                tags.add("Broker", m->getBroker());
-                orders_aggregator_->add(tags, "cancelledOrders", static_cast<int64_t>(1), ts_ns);
-                orders_aggregator_->add(tags, "totalCancelQty", static_cast<int64_t>(m->cancelled_qty), ts_ns);
-                orders_aggregator_->onIncomingTimestamp(ts_ns);
-            }
+        case MarketDataType::ORDER_CANCEL:
+            processOrderCancel(msg, ts_ns);
             break;
-        }
-        case MarketDataType::TRADE: {
-            const auto* m = castMessage<TradeMsg>(msg.body, msg.body_length);
-            if (m) {
-                metrics::TagSet tags;
-                tags.add("Market", m->getMarket());
-                tags.add("Instrument", m->getInstrument());
-                trades_aggregator_->add(tags, "numTrades", static_cast<int64_t>(1), ts_ns);
-                trades_aggregator_->add(tags, "totalVolume", static_cast<int64_t>(m->quantity), ts_ns);
-                trades_aggregator_->add(tags, "totalValue", m->price * m->quantity, ts_ns);
-                trades_aggregator_->set(tags, "highPrice", m->price, ts_ns);
-                trades_aggregator_->set(tags, "lowPrice", m->price, ts_ns);
-                trades_aggregator_->onIncomingTimestamp(ts_ns);
-            }
+        case MarketDataType::TRADE:
+            processTrade(msg, ts_ns);
             break;
-        }
-        case MarketDataType::QUOTE_BID: {
-            const auto* m = castMessage<QuoteBidMsg>(msg.body, msg.body_length);
-            if (m) {
-                metrics::TagSet tags;
-                tags.add("Market", m->getMarket());
-                tags.add("Instrument", m->getInstrument());
-                quotes_aggregator_->add(tags, "bidUpdates", static_cast<int64_t>(1), ts_ns);
-                quotes_aggregator_->set(tags, "bestBid", m->price, ts_ns);
-                quotes_aggregator_->set(tags, "bestBidQty", static_cast<int64_t>(m->quantity), ts_ns);
-                quotes_aggregator_->onIncomingTimestamp(ts_ns);
-            }
+        case MarketDataType::QUOTE_BID:
+            processQuoteBid(msg, ts_ns);
             break;
-        }
-        case MarketDataType::QUOTE_ASK: {
-            const auto* m = castMessage<QuoteAskMsg>(msg.body, msg.body_length);
-            if (m) {
-                metrics::TagSet tags;
-                tags.add("Market", m->getMarket());
-                tags.add("Instrument", m->getInstrument());
-                quotes_aggregator_->add(tags, "askUpdates", static_cast<int64_t>(1), ts_ns);
-                quotes_aggregator_->set(tags, "bestAsk", m->price, ts_ns);
-                quotes_aggregator_->set(tags, "bestAskQty", static_cast<int64_t>(m->quantity), ts_ns);
-                quotes_aggregator_->onIncomingTimestamp(ts_ns);
-            }
+        case MarketDataType::QUOTE_ASK:
+            processQuoteAsk(msg, ts_ns);
             break;
-        }
         default:
             break;
     }
+}
+
+void MsgClient::processOrderNew(const SubMessage& msg, uint64_t ts_ns) {
+    const auto* m = castMessage<OrderNewMsg>(msg.body, msg.body_length);
+    if (!m) return;
+    metrics::TagSet tags;
+    tags.add("Market", m->getMarket());
+    tags.add("Instrument", m->getInstrument());
+    tags.add("Broker", m->getBroker());
+    orders_aggregator_->add(tags, "newOrders", static_cast<int64_t>(1), ts_ns);
+    orders_aggregator_->add(tags, "openOrders", static_cast<int64_t>(1), ts_ns);
+    orders_aggregator_->add(tags, "totalOrderQty", static_cast<int64_t>(m->quantity), ts_ns);
+    orders_aggregator_->onIncomingTimestamp(ts_ns);
+}
+
+void MsgClient::processOrderUpdate(const SubMessage& msg, uint64_t ts_ns) {
+    const auto* m = castMessage<OrderUpdateMsg>(msg.body, msg.body_length);
+    if (!m) return;
+    metrics::TagSet tags;
+    tags.add("Market", m->getMarket());
+    tags.add("Instrument", m->getInstrument());
+    tags.add("Broker", m->getBroker());
+    orders_aggregator_->add(tags, "modifiedOrders", static_cast<int64_t>(1), ts_ns);
+    orders_aggregator_->onIncomingTimestamp(ts_ns);
+}
+
+void MsgClient::processOrderCancel(const SubMessage& msg, uint64_t ts_ns) {
+    const auto* m = castMessage<OrderCancelMsg>(msg.body, msg.body_length);
+    if (!m) return;
+    metrics::TagSet tags;
+    tags.add("Market", m->getMarket());
+    tags.add("Instrument", m->getInstrument());
+    tags.add("Broker", m->getBroker());
+    orders_aggregator_->add(tags, "cancelledOrders", static_cast<int64_t>(1), ts_ns);
+    orders_aggregator_->add(tags, "totalCancelQty", static_cast<int64_t>(m->cancelled_qty), ts_ns);
+    orders_aggregator_->onIncomingTimestamp(ts_ns);
+}
+
+void MsgClient::processTrade(const SubMessage& msg, uint64_t ts_ns) {
+    const auto* m = castMessage<TradeMsg>(msg.body, msg.body_length);
+    if (!m) return;
+    metrics::TagSet tags;
+    tags.add("Market", m->getMarket());
+    tags.add("Instrument", m->getInstrument());
+    trades_aggregator_->add(tags, "numTrades", static_cast<int64_t>(1), ts_ns);
+    trades_aggregator_->add(tags, "totalVolume", static_cast<int64_t>(m->quantity), ts_ns);
+    trades_aggregator_->add(tags, "totalValue", m->price * m->quantity, ts_ns);
+    trades_aggregator_->set(tags, "highPrice", m->price, ts_ns);
+    trades_aggregator_->set(tags, "lowPrice", m->price, ts_ns);
+    trades_aggregator_->onIncomingTimestamp(ts_ns);
+}
+
+void MsgClient::processQuoteBid(const SubMessage& msg, uint64_t ts_ns) {
+    const auto* m = castMessage<QuoteBidMsg>(msg.body, msg.body_length);
+    if (!m) return;
+    metrics::TagSet tags;
+    tags.add("Market", m->getMarket());
+    tags.add("Instrument", m->getInstrument());
+    quotes_aggregator_->add(tags, "bidUpdates", static_cast<int64_t>(1), ts_ns);
+    quotes_aggregator_->set(tags, "bestBid", m->price, ts_ns);
+    quotes_aggregator_->set(tags, "bestBidQty", static_cast<int64_t>(m->quantity), ts_ns);
+    quotes_aggregator_->onIncomingTimestamp(ts_ns);
+}
+
+void MsgClient::processQuoteAsk(const SubMessage& msg, uint64_t ts_ns) {
+    const auto* m = castMessage<QuoteAskMsg>(msg.body, msg.body_length);
+    if (!m) return;
+    metrics::TagSet tags;
+    tags.add("Market", m->getMarket());
+    tags.add("Instrument", m->getInstrument());
+    quotes_aggregator_->add(tags, "askUpdates", static_cast<int64_t>(1), ts_ns);
+    quotes_aggregator_->set(tags, "bestAsk", m->price, ts_ns);
+    quotes_aggregator_->set(tags, "bestAskQty", static_cast<int64_t>(m->quantity), ts_ns);
+    quotes_aggregator_->onIncomingTimestamp(ts_ns);
 }

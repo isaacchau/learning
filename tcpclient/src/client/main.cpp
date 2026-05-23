@@ -385,6 +385,66 @@ static bool parseAggregationOption(int argc, const char* const argv[], int& i,
   return true;
 }
 
+static void printFinalStats(const StatsSnapshot& stats) {
+  LOG_INFO("\n=== Final Statistics ===\n"
+           "  Messages Received:  %lu\n"
+           "  Messages Decoded:   %lu\n"
+           "  Messages Processed: %lu\n"
+           "  Messages Dropped:   %lu\n"
+           "  Bytes Received:     %lu\n"
+           "  Reconnects:         %lu\n"
+           "  Parse Errors:       %lu\n"
+           "========================",
+           stats.messages_received, stats.messages_decoded,
+           stats.messages_processed, stats.messages_dropped,
+           stats.bytes_received, stats.reconnect_count,
+           stats.parse_errors);
+}
+
+static void printConfiguration(const MsgClientConfig& config, int stats_interval_sec) {
+  LOG_INFO("=== MsgClient Configuration ===");
+  LOG_INFO("  Workers:        %zu", config.worker_thread_count);
+  LOG_INFO("  Raw Queue:      %zu", config.raw_queue_size);
+  LOG_INFO("  Decoded Queue:  %zu (per worker)", config.decoded_queue_size);
+  LOG_INFO("  Reconnect:      %d ms", config.reconnect_interval_ms);
+  LOG_INFO("  Queue Timeout:  %d ms", config.queue_push_timeout_ms);
+  LOG_INFO("  Stats Interval: %d s", stats_interval_sec);
+  LOG_INFO("  Connections:    %zu", config.connections.size());
+  for (size_t i = 0; i < config.connections.size(); ++i) {
+    const auto& conn = config.connections[i];
+    std::string ep_list;
+    for (size_t j = 0; j < conn.endpoints.size(); ++j) {
+      if (j > 0) ep_list += ", ";
+      ep_list += conn.endpoints[j].host + ":" + std::to_string(conn.endpoints[j].port);
+    }
+    LOG_INFO("    [%zu] %s (item='%s', client='%s', seq=%lu, retries=%d)",
+             i, ep_list.c_str(), conn.item_name.c_str(),
+             conn.client_id.c_str(), conn.starting_seq_num,
+             conn.max_retries_per_endpoint);
+  }
+
+  LOG_INFO("  Aggregation:    %s", config.aggregation_config.enabled ? "enabled" : "disabled");
+  if (config.aggregation_config.enabled) {
+    LOG_INFO("    Window:       %lu ms", config.aggregation_config.window_ms);
+    LOG_INFO("    Format:       %s", config.aggregation_config.output_format == metrics::OutputFormat::CSV ? "csv" : "influxdb_line");
+    LOG_INFO("    Output Dir:   %s", config.aggregation_config.output_dir.c_str());
+    LOG_INFO("    Prefix:       %s", config.aggregation_config.filename_prefix.c_str());
+  }
+  LOG_INFO("================================");
+}
+
+static void setupSignalHandlers() {
+  struct sigaction sa;
+  std::memset(&sa, 0, sizeof(sa));
+  sa.sa_handler = signalHandler;
+  sigemptyset(&sa.sa_mask);
+  sigaction(SIGINT, &sa, nullptr);
+  sigaction(SIGTERM, &sa, nullptr);
+
+  // Ignore SIGPIPE (broken pipe on send)
+  signal(SIGPIPE, SIG_IGN);
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -512,17 +572,6 @@ int main(int argc, char *argv[]) {
   LogMsg::getInstance().init(argv[0], log_dir.empty() ? nullptr : log_dir.c_str(),
                              log_stdout, log_file, log_syslog);
 
-  // Install signal handlers for graceful shutdown
-  struct sigaction sa;
-  std::memset(&sa, 0, sizeof(sa));
-  sa.sa_handler = signalHandler;
-  sigemptyset(&sa.sa_mask);
-  sigaction(SIGINT, &sa, nullptr);
-  sigaction(SIGTERM, &sa, nullptr);
-
-  // Ignore SIGPIPE (broken pipe on send)
-  signal(SIGPIPE, SIG_IGN);
-
   // Validate aggregation config if enabled
   if (config.aggregation_config.enabled) {
     std::string agg_error = config.aggregation_config.validate();
@@ -532,37 +581,8 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  // Print configuration
-  LOG_INFO("=== MsgClient Configuration ===");
-  LOG_INFO("  Workers:        %zu", config.worker_thread_count);
-  LOG_INFO("  Raw Queue:      %zu", config.raw_queue_size);
-  LOG_INFO("  Decoded Queue:  %zu (per worker)", config.decoded_queue_size);
-  LOG_INFO("  Reconnect:      %d ms", config.reconnect_interval_ms);
-  LOG_INFO("  Queue Timeout:  %d ms", config.queue_push_timeout_ms);
-  LOG_INFO("  Stats Interval: %d s", stats_interval_sec);
-  LOG_INFO("  Connections:    %zu", config.connections.size());
-  for (size_t i = 0; i < config.connections.size(); ++i) {
-    const auto& conn = config.connections[i];
-    std::string ep_list;
-    for (size_t j = 0; j < conn.endpoints.size(); ++j) {
-      if (j > 0) ep_list += ", ";
-      ep_list += conn.endpoints[j].host + ":" + std::to_string(conn.endpoints[j].port);
-    }
-    LOG_INFO("    [%zu] %s (item='%s', client='%s', seq=%lu, retries=%d)",
-             i, ep_list.c_str(), conn.item_name.c_str(),
-             conn.client_id.c_str(), conn.starting_seq_num,
-             conn.max_retries_per_endpoint);
-  }
-  
-  // Print aggregation config
-  LOG_INFO("  Aggregation:    %s", config.aggregation_config.enabled ? "enabled" : "disabled");
-  if (config.aggregation_config.enabled) {
-    LOG_INFO("    Window:       %lu ms", config.aggregation_config.window_ms);
-    LOG_INFO("    Format:       %s", config.aggregation_config.output_format == metrics::OutputFormat::CSV ? "csv" : "influxdb_line");
-    LOG_INFO("    Output Dir:   %s", config.aggregation_config.output_dir.c_str());
-    LOG_INFO("    Prefix:       %s", config.aggregation_config.filename_prefix.c_str());
-  }
-  LOG_INFO("================================");
+  setupSignalHandlers();
+  printConfiguration(config, stats_interval_sec);
 
   // Create and start client
   MsgClient client(config);
@@ -587,39 +607,41 @@ int main(int argc, char *argv[]) {
     sleep(1);
 
     auto now = std::chrono::steady_clock::now();
-    auto elapsed =
+    auto elapsed_sec =
         std::chrono::duration_cast<std::chrono::seconds>(now - last_print).count();
 
-    if (elapsed >= stats_interval_sec) {
-      StatsSnapshot snap = client.getStats();
-
-      uint64_t delta_recv =
-          snap.messages_received - prev_snap.messages_received;
-      uint64_t delta_proc =
-          snap.messages_processed - prev_snap.messages_processed;
-      uint64_t delta_bytes = snap.bytes_received - prev_snap.bytes_received;
-      double mbps = (delta_bytes * 8.0) / (elapsed * 1000000.0);
-
-      LOG_INFO("[Stats] recv=%lu(+%lu) decoded=%lu proc=%lu(+%lu) "
-               "dropped=%lu bytes=%lu(%.2f Mbps) reconnects=%lu "
-               "parse_err=%lu conns=%zu",
-               snap.messages_received, delta_recv, snap.messages_decoded,
-               snap.messages_processed, delta_proc, snap.messages_dropped,
-               snap.bytes_received, mbps,
-               snap.reconnect_count, snap.parse_errors,
-               snap.connection_stats.size());
-
-      // Print per-connection stats
-      for (const auto& cs : snap.connection_stats) {
-        LOG_INFO("[Conn %lu] %s item='%s' recv=%lu bytes=%lu reconnects=%lu %s",
-                 cs.connection_id, cs.endpoint.c_str(), cs.item_name.c_str(),
-                 cs.messages_received, cs.bytes_received, cs.reconnect_count,
-                 cs.connected ? "(connected)" : "(disconnected)");
-      }
-
-      prev_snap = snap;
-      last_print = now;
+    if (elapsed_sec < stats_interval_sec) {
+      continue;
     }
+
+    StatsSnapshot stats = client.getStats();
+
+    uint64_t delta_recv =
+        stats.messages_received - prev_snap.messages_received;
+    uint64_t delta_proc =
+        stats.messages_processed - prev_snap.messages_processed;
+    uint64_t delta_bytes = stats.bytes_received - prev_snap.bytes_received;
+    double mbps = (delta_bytes * 8.0) / (elapsed_sec * 1000000.0);
+
+    LOG_INFO("[Stats] recv=%lu(+%lu) decoded=%lu proc=%lu(+%lu) "
+             "dropped=%lu bytes=%lu(%.2f Mbps) reconnects=%lu "
+             "parse_err=%lu conns=%zu",
+             stats.messages_received, delta_recv, stats.messages_decoded,
+             stats.messages_processed, delta_proc, stats.messages_dropped,
+             stats.bytes_received, mbps,
+             stats.reconnect_count, stats.parse_errors,
+             stats.connection_stats.size());
+
+    // Print per-connection stats
+    for (const auto& conn_stats : stats.connection_stats) {
+      LOG_INFO("[Conn %lu] %s item='%s' recv=%lu bytes=%lu reconnects=%lu %s",
+               conn_stats.connection_id, conn_stats.endpoint.c_str(), conn_stats.item_name.c_str(),
+               conn_stats.messages_received, conn_stats.bytes_received, conn_stats.reconnect_count,
+               conn_stats.connected ? "(connected)" : "(disconnected)");
+    }
+
+    prev_snap = stats;
+    last_print = now;
 
     // Pool statistics (optional, default off)
     if (pool_stats_interval_sec > 0) {
@@ -644,21 +666,7 @@ int main(int argc, char *argv[]) {
   LOG_INFO("[Main] Shutting down...");
   client.stop();
 
-  // Final statistics
-  StatsSnapshot final_snap = client.getStats();
-  LOG_INFO("\n=== Final Statistics ===\n"
-           "  Messages Received:  %lu\n"
-           "  Messages Decoded:   %lu\n"
-           "  Messages Processed: %lu\n"
-           "  Messages Dropped:   %lu\n"
-           "  Bytes Received:     %lu\n"
-           "  Reconnects:         %lu\n"
-           "  Parse Errors:       %lu\n"
-           "========================",
-           final_snap.messages_received, final_snap.messages_decoded,
-           final_snap.messages_processed, final_snap.messages_dropped,
-           final_snap.bytes_received, final_snap.reconnect_count,
-           final_snap.parse_errors);
+  printFinalStats(client.getStats());
 
   LogMsg::getInstance().shutdown();
   return 0;

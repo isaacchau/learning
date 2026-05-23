@@ -497,6 +497,14 @@ private:
     // Aggregation helper (extracted from workerLoop)
     void processAggregationMessage(const SubMessage& msg);
 
+    // Per-type aggregation handlers (extracted from processAggregationMessage)
+    void processOrderNew(const SubMessage& msg, uint64_t ts_ns);
+    void processOrderUpdate(const SubMessage& msg, uint64_t ts_ns);
+    void processOrderCancel(const SubMessage& msg, uint64_t ts_ns);
+    void processTrade(const SubMessage& msg, uint64_t ts_ns);
+    void processQuoteBid(const SubMessage& msg, uint64_t ts_ns);
+    void processQuoteAsk(const SubMessage& msg, uint64_t ts_ns);
+
     // Thread join helper
     static void joinThread(std::thread& t);
 
@@ -505,6 +513,11 @@ private:
 
     // Aggregation setup helper (extracted from constructor)
     void initAggregationComponents();
+
+    // Shutdown helpers (extracted from stop() for readability)
+    void shutdownEpoll();
+    void joinThreadsInOrder();
+    void flushAndStopAggregators();
 
     // Failover
     // Rotate to next endpoint when retries are exhausted; reset backoff.

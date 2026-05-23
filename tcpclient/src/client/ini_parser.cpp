@@ -184,6 +184,16 @@ const IniFile::Section* IniFile::findSection(const std::string& name,
     return &sections_[it->second[occurrence]];
 }
 
+static std::string stripQuotes(const std::string& value) {
+    if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
+        return value.substr(1, value.size() - 2);
+    }
+    if (value.size() >= 2 && value.front() == '\'' && value.back() == '\'') {
+        return value.substr(1, value.size() - 2);
+    }
+    return value;
+}
+
 bool IniFile::parseLines(const std::vector<std::string>& lines, std::string& error) {
     Section* currentSection = nullptr;
 
@@ -219,18 +229,11 @@ bool IniFile::parseLines(const std::vector<std::string>& lines, std::string& err
         }
 
         std::string key = trim(line.substr(0, eqPos));
-        std::string value = trim(line.substr(eqPos + 1));
+        std::string value = stripQuotes(trim(line.substr(eqPos + 1)));
 
         if (key.empty()) {
             error = "Line " + std::to_string(lineNum + 1) + ": empty key";
             return false;
-        }
-
-        // Strip quotes from value if present
-        if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
-            value = value.substr(1, value.size() - 2);
-        } else if (value.size() >= 2 && value.front() == '\'' && value.back() == '\'') {
-            value = value.substr(1, value.size() - 2);
         }
 
         if (!currentSection) {
