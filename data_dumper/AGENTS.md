@@ -12,6 +12,7 @@ The entire library lives in `data_dumper.h` (~400 lines). There is no external d
 - **Build Tool**: GNU Make + g++
 - **Library Type**: Header-only (no compilation step needed to use the library)
 - **Platform**: Linux / POSIX (relies on `abi::__cxa_demangle`, available on GCC and Clang)
+- **Generator Script**: Python 3 (no third-party packages required)
 
 ## File Layout
 
@@ -26,10 +27,15 @@ The entire library lives in `data_dumper.h` (~400 lines). There is no external d
 │   └── market_data.h              # Example upstream header (simulated, unmodifiable)
 ├── generated/
 │   └── market_data_dumps.h        # Auto-generated registration for upstream/
-└── Makefile                       # Builds the demo binaries
+├── tests/
+│   ├── inputs/                    # Empty directory reserved for test inputs
+│   ├── outputs/                   # Empty directory reserved for test outputs
+│   └── test_generate_dd_dump.py   # Python unittest suite for the generator
+├── Makefile                       # Builds the demo binaries
+└── .gitignore                     # Ignores build artifacts (*.o, a.out, demo binaries)
 ```
 
-There are no package managers and no generated build files (besides `generated/`).
+There are no package managers and no generated build files (besides `generated/` and build artifacts).
 
 ## Build and Test Commands
 
@@ -75,7 +81,16 @@ Compiler flags used (`Makefile`):
 -std=c++14 -Wall -Wextra -O2 -I.
 ```
 
-There is **no formal unit-test framework**. The project is validated by inspecting the output of the demo binaries, which exercises:
+Run the Python generator test suite:
+
+```bash
+python3 tests/test_generate_dd_dump.py
+```
+
+## Testing Strategy
+
+### C++ Validation
+There is **no formal C++ unit-test framework**. The C++ library is validated by inspecting the output of the demo binaries, which exercises:
 
 - Simple structs
 - Nested structs
@@ -88,6 +103,25 @@ There is **no formal unit-test framework**. The project is validated by inspecti
 - `std::atomic<T>`
 - Strings with escape sequences
 - **Upstream structs via generated free-function `dd_dump()`**
+
+### Generator Test Suite
+The Python generator (`generate_dd_dump.py`) has a `unittest`-based test suite in `tests/test_generate_dd_dump.py`. The tests:
+
+- Create temporary headers with various C++ constructs
+- Run the generator and inspect the emitted text
+- Compile the generated header with `g++ -std=c++14 -Wall -Wextra` to ensure it is valid C++
+
+Coverage includes:
+- Simple and namespaced structs
+- Scoped and unscoped enums
+- Auto-discovery of nested includes
+- Skipping template structs
+- Bitfields
+- Arrays (including multidimensional)
+- Function pointers (skipped)
+- Nested structs with fields
+- Static members (skipped)
+- Multiple input headers
 
 ## How the Library Works
 
@@ -174,6 +208,30 @@ std::cout << DataDumper::dump("cfg", cfg) << "\n";
 ### Recursion Guard
 
 The dumper hard-caps nesting depth at `MAX_DEPTH = 10` to avoid infinite recursion on circular structures.
+
+## Code Generator Details
+
+`generate_dd_dump.py` is a standalone Python 3 script that produces DataDumper registration headers for unmodifiable upstream C++ headers. It works by:
+
+1. **Preprocessing** the input headers with `g++ -E -std=c++14`
+2. **Filtering** out system header content using `#line` directives
+3. **Parsing** the remaining text with a lightweight brace-level scanner (regex-based)
+4. **Emitting** `inline void dd_dump(const T&, DataDumper&)` free functions and `EnumTraits<T>` specializations
+
+The parser handles:
+- Namespaces (nested)
+- Structs and classes (including nested types)
+- Scoped (`enum class`) and unscoped enums
+- Bitfields and array fields
+
+The parser intentionally skips:
+- Template definitions
+- Function pointers
+- `static` members
+- `typedef`, `using`, `static_assert`, `friend` declarations
+- Access specifiers (`public:`, `private:`, `protected:`)
+
+Generated headers include `#include "data_dumper.h"` and the original input headers, group free functions by namespace, and deduplicate by qualified name.
 
 ## Code Style Guidelines
 

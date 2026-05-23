@@ -1,15 +1,20 @@
 #ifndef DATA_DUMPER_H
 #define DATA_DUMPER_H
 
+#include <array>
 #include <atomic>
 #include <cxxabi.h>
+#include <deque>
 #include <iomanip>
+#include <list>
 #include <map>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -29,10 +34,15 @@ struct EnumTraits {
 // ============================================================================
 // DataDumper -- main pretty-printing engine
 // ============================================================================
-
 class DataDumper {
 public:
-    DataDumper() = default;
+    static constexpr int DEFAULT_MAX_DEPTH = 10;
+
+    DataDumper() : max_depth_(DEFAULT_MAX_DEPTH) {}
+    explicit DataDumper(int max_depth) : max_depth_(max_depth) {}
+
+    void set_max_depth(int max_depth) { max_depth_ = max_depth; }
+    int get_max_depth() const { return max_depth_; }
 
     // Begin a named struct block
     void begin(const char* name) {
@@ -50,7 +60,7 @@ public:
     // Print one field
     template <typename T>
     void field(const char* name, const T& value) {
-        if (depth_ >= MAX_DEPTH) {
+        if (depth_ >= max_depth_) {
             indent();
             out_ << name << " = (max depth reached)\n";
             return;
@@ -71,10 +81,29 @@ public:
         return dd.str();
     }
 
+    // Static convenience: dump a value with a name prefix and custom max depth
+    template <typename T>
+    static std::string dump(const char* name, const T& value, int max_depth) {
+        DataDumper dd(max_depth);
+        dd.out_ << name << " = ";
+        dd.dump_value(value);
+        dd.out_ << "\n";
+        return dd.str();
+    }
+
     // Static convenience: dump a value without a name prefix
     template <typename T>
     static std::string dump(const T& value) {
         DataDumper dd;
+        dd.dump_value(value);
+        dd.out_ << "\n";
+        return dd.str();
+    }
+
+    // Static convenience: dump a value without a name prefix and custom max depth
+    template <typename T>
+    static std::string dump(const T& value, int max_depth) {
+        DataDumper dd(max_depth);
         dd.dump_value(value);
         dd.out_ << "\n";
         return dd.str();
@@ -85,7 +114,7 @@ public:
 private:
     std::ostringstream out_;
     int depth_ = 0;
-    static constexpr int MAX_DEPTH = 10;
+    int max_depth_ = DEFAULT_MAX_DEPTH;
 
     void indent() {
         for (int i = 0; i < depth_; ++i) out_ << "  ";
@@ -118,10 +147,14 @@ private:
     // --- Type name helper (demangle via abi::__cxa_demangle) ---
     template <typename T>
     static std::string type_name() {
+#if defined(__GXX_RTTI) || defined(_CPPRTTI)
         int status = 0;
         char* demangled = abi::__cxa_demangle(typeid(T).name(), nullptr, nullptr, &status);
         std::string result = (status == 0 && demangled) ? demangled : typeid(T).name();
         free(demangled);
+#else
+        std::string result = "(unknown type)";
+#endif
         if (result.size() >= 7 && result.substr(0, 7) == "struct ")
             result = result.substr(7);
         else if (result.size() >= 6 && result.substr(0, 6) == "class ")
@@ -234,10 +267,29 @@ private:
         dump_value(*val);
     }
 
+    // 12b. Generic C-style arrays: T[N]
+    template <typename T, size_t N>
+    void dump_value(const T (&val)[N]) {
+        out_ << "[" << N << "] {\n";
+        ++depth_;
+        for (size_t i = 0; i < N; ++i) {
+            indent();
+            out_ << "[" << i << "] = ";
+            dump_value(val[i]);
+            out_ << "\n";
+        }
+        --depth_;
+        indent();
+        out_ << "}";
+    }
+
     // 13. Raw pointer (not char* -- char* is handled by overload #9)
     template <typename T>
-    auto dump_value(const T* val)
-        -> typename std::enable_if<!std::is_same<T, char>::value, void>::type {
+    auto dump_value(T val)
+        -> typename std::enable_if<
+            std::is_pointer<T>::value &&
+            !std::is_same<typename std::remove_cv<typename std::remove_pointer<T>::type>::type, char>::value,
+            void>::type {
         if (!val) {
             out_ << "(null)";
             return;
@@ -254,6 +306,56 @@ private:
             indent();
             out_ << "[" << i << "] = ";
             dump_value(val[i]);
+            out_ << "\n";
+        }
+        --depth_;
+        indent();
+        out_ << "}";
+    }
+
+    // 14b. std::array<T, N>
+    template <typename T, size_t N>
+    void dump_value(const std::array<T, N>& val) {
+        out_ << "[" << N << "] {\n";
+        ++depth_;
+        for (size_t i = 0; i < N; ++i) {
+            indent();
+            out_ << "[" << i << "] = ";
+            dump_value(val[i]);
+            out_ << "\n";
+        }
+        --depth_;
+        indent();
+        out_ << "}";
+    }
+
+    // 14c. std::list<T>
+    template <typename T, typename Alloc>
+    void dump_value(const std::list<T, Alloc>& val) {
+        out_ << "[" << val.size() << "] {\n";
+        ++depth_;
+        size_t i = 0;
+        for (const auto& item : val) {
+            indent();
+            out_ << "[" << i++ << "] = ";
+            dump_value(item);
+            out_ << "\n";
+        }
+        --depth_;
+        indent();
+        out_ << "}";
+    }
+
+    // 14d. std::deque<T>
+    template <typename T, typename Alloc>
+    void dump_value(const std::deque<T, Alloc>& val) {
+        out_ << "[" << val.size() << "] {\n";
+        ++depth_;
+        size_t i = 0;
+        for (const auto& item : val) {
+            indent();
+            out_ << "[" << i++ << "] = ";
+            dump_value(item);
             out_ << "\n";
         }
         --depth_;
@@ -294,6 +396,36 @@ private:
             indent();
             out_ << "val = ";
             dump_value(p.second);
+            out_ << "\n";
+        }
+        --depth_;
+        indent();
+        out_ << "}";
+    }
+
+    // 16b. std::set<T>
+    template <typename T, typename Compare, typename Alloc>
+    void dump_value(const std::set<T, Compare, Alloc>& val) {
+        out_ << "[" << val.size() << "] {\n";
+        ++depth_;
+        for (const auto& item : val) {
+            indent();
+            dump_value(item);
+            out_ << "\n";
+        }
+        --depth_;
+        indent();
+        out_ << "}";
+    }
+
+    // 16c. std::unordered_set<T>
+    template <typename T, typename Hash, typename KeyEqual, typename Alloc>
+    void dump_value(const std::unordered_set<T, Hash, KeyEqual, Alloc>& val) {
+        out_ << "[" << val.size() << "] {\n";
+        ++depth_;
+        for (const auto& item : val) {
+            indent();
+            dump_value(item);
             out_ << "\n";
         }
         --depth_;

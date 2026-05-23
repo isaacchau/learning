@@ -261,5 +261,56 @@ int main() {
         std::cout << DataDumper::dump("message", msg) << "\n";
     }
 
+    std::cout << "=== Demo 13: Generic C-Style Array / Multidimensional Array ===\n";
+    {
+        int matrix[2][3] = {{1, 2, 3}, {4, 5, 6}};
+        std::cout << DataDumper::dump("matrix", matrix) << "\n";
+    }
+
+    std::cout << "=== Demo 14: std::array ===\n";
+    {
+        std::array<std::string, 3> arr = {{"apple", "banana", "cherry"}};
+        std::cout << DataDumper::dump("array", arr) << "\n";
+    }
+
+    std::cout << "=== Demo 15: std::set & std::unordered_set ===\n";
+    {
+        std::set<int> my_set = {10, 20, 30};
+        std::unordered_set<std::string> my_uset = {"red", "green", "blue"};
+        std::cout << DataDumper::dump("set", my_set) << "\n";
+        std::cout << DataDumper::dump("unordered_set", my_uset) << "\n";
+    }
+
+    std::cout << "=== Demo 16: std::list & std::deque ===\n";
+    {
+        std::list<double> my_list = {1.1, 2.2, 3.3};
+        std::deque<int> my_deque = {100, 200, 300};
+        std::cout << DataDumper::dump("list", my_list) << "\n";
+        std::cout << DataDumper::dump("deque", my_deque) << "\n";
+    }
+
+    std::cout << "=== Demo 17: Configurable Nesting Depth Guard ===\n";
+    {
+        struct Node {
+            std::string name;
+            std::shared_ptr<Node> next;
+            DD_DUMPABLE() {
+                DD_FIELD(name);
+                DD_FIELD(next);
+            }
+        };
+        auto n1 = std::make_shared<Node>(); n1->name = "Node 1";
+        auto n2 = std::make_shared<Node>(); n2->name = "Node 2";
+        auto n3 = std::make_shared<Node>(); n3->name = "Node 3";
+        n1->next = n2;
+        n2->next = n3;
+
+        std::cout << "Default depth limit (10):\n"
+                  << DataDumper::dump("node1", n1) << "\n";
+
+        std::cout << "Custom depth limit (2):\n"
+                  << DataDumper::dump("node1_shallow", n1, 2) << "\n";
+    }
+
     return 0;
 }
