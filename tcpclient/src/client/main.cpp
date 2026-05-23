@@ -210,7 +210,7 @@ static ConnectionConfig makeDefaultConn() {
 // ============================================================================
 
 // Parse a connection-specific CLI option.  Returns false on error.
-static bool parseConnectionOption(int argc, char* const argv[], int& i,
+static bool parseConnectionOption(int argc, const char* const argv[], int& i,
                                   ConnectionConfig& current_conn,
                                   MsgClientConfig& config,
                                   bool& has_connection) {
@@ -271,7 +271,7 @@ static bool parseConnectionOption(int argc, char* const argv[], int& i,
 }
 
 // Parse a global (non-connection) CLI option.  Returns false on error.
-static bool parseGlobalOption(int argc, char* const argv[], int& i,
+static bool parseGlobalOption(int argc, const char* const argv[], int& i,
                               MsgClientConfig& config,
                               int& stats_interval_sec,
                               int& pool_stats_interval_sec,
@@ -358,7 +358,7 @@ static bool parseGlobalOption(int argc, char* const argv[], int& i,
 }
 
 // Parse an aggregation-related CLI option.  Returns false on error.
-static bool parseAggregationOption(int argc, char* const argv[], int& i,
+static bool parseAggregationOption(int argc, const char* const argv[], int& i,
                                    MsgClientConfig& config) {
   if (strcmp(argv[i], "--aggregation") == 0) {
     config.aggregation_config.enabled = true;

@@ -153,13 +153,9 @@ public:
             }
             case STRING: {
                 // Quote if contains comma, quote, or newline
-                bool needs_quote = false;
-                for (char c : s_) {
-                    if (c == ',' || c == '"' || c == '\n' || c == '\r') {
-                        needs_quote = true;
-                        break;
-                    }
-                }
+                bool needs_quote = std::any_of(s_.begin(), s_.end(), [](char c) {
+                    return c == ',' || c == '"' || c == '\n' || c == '\r';
+                });
                 if (!needs_quote) return s_;
                 std::string result = "\"";
                 for (char c : s_) {
@@ -253,23 +249,23 @@ struct Datapoint {
     std::vector<std::pair<std::string, Value>> fields;
 
     void addField(const std::string& name, const Value& value) {
-        for (auto& f : fields) {
-            if (f.first == name) {
-                f.second.add(value);
-                return;
-            }
+        auto it = std::find_if(fields.begin(), fields.end(),
+                               [&name](const std::pair<std::string, Value>& f) { return f.first == name; });
+        if (it != fields.end()) {
+            it->second.add(value);
+        } else {
+            fields.emplace_back(name, value);
         }
-        fields.emplace_back(name, value);
     }
 
     void setField(const std::string& name, const Value& value) {
-        for (auto& f : fields) {
-            if (f.first == name) {
-                f.second.set(value);
-                return;
-            }
+        auto it = std::find_if(fields.begin(), fields.end(),
+                               [&name](const std::pair<std::string, Value>& f) { return f.first == name; });
+        if (it != fields.end()) {
+            it->second.set(value);
+        } else {
+            fields.emplace_back(name, value);
         }
-        fields.emplace_back(name, value);
     }
 };
 
@@ -411,23 +407,19 @@ public:
             oss << measurement;
             for (const auto& k : tag_keys) {
                 oss << ",";
-                bool found = false;
-                for (const auto& t : dp.tags.data()) {
-                    if (t.first == k) {
-                        oss << t.second;
-                        found = true;
-                        break;
-                    }
+                const auto& tags = dp.tags.data();
+                auto it = std::find_if(tags.begin(), tags.end(),
+                                       [&k](const auto& t) { return t.first == k; });
+                if (it != tags.end()) {
+                    oss << it->second;
                 }
-                if (!found) oss << "";
             }
             for (const auto& k : field_keys) {
                 oss << ",";
-                for (const auto& f : dp.fields) {
-                    if (f.first == k) {
-                        oss << f.second.formatCSV();
-                        break;
-                    }
+                auto it = std::find_if(dp.fields.begin(), dp.fields.end(),
+                                       [&k](const auto& f) { return f.first == k; });
+                if (it != dp.fields.end()) {
+                    oss << it->second.formatCSV();
                 }
             }
             oss << "," << dp.bucket_ts << "\n";

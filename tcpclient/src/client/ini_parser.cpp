@@ -166,9 +166,9 @@ std::vector<std::string> IniFile::getKeys(const std::string& section,
     std::vector<std::string> keys;
     const Section* sec = findSection(section, occurrence);
     if (!sec) return keys;
-    for (const auto& kv : sec->values) {
-        keys.push_back(kv.first);
-    }
+    keys.reserve(sec->values.size());
+    std::transform(sec->values.begin(), sec->values.end(), std::back_inserter(keys),
+                   [](const auto& kv) { return kv.first; });
     return keys;
 }
 
