@@ -239,6 +239,8 @@ MsgClient::MsgClient(const MsgClientConfig& config)
     }
 
     // Create memory pool
+    // Using the pool instead of malloc/free per message eliminates allocator
+    // contention and keeps buffer addresses hot in CPU cache.
     if (config_.pool_config.empty()) {
         pool_.reset(new MemoryPool());
     } else {
@@ -685,6 +687,7 @@ bool MsgClient::sendSubscription(size_t conn_idx) {
     std::memset(&req, 0, sizeof(req));
     req.reqKey = getMagicKey();
     snprintf(req.reqItem, sizeof(req.reqItem), "%s", conn.config.item_name.c_str());
+    // Resume from last received sequence to avoid gaps on reconnect.
     uint64_t resume_seq = conn.last_received_seq_.load(std::memory_order_relaxed);
     req.lastRespSeq = resume_seq;
     snprintf(req.clientID, sizeof(req.clientID), "%s", conn.config.client_id.c_str());
@@ -740,10 +743,15 @@ void MsgClient::handleConnectFailure(size_t conn_idx, const char* reason) {
     conn.reconnect_count_.fetch_add(1, std::memory_order_relaxed);
     stats_.reconnect_count.fetch_add(1, std::memory_order_relaxed);
 
+    // Failover to next endpoint only if we have multiple endpoints and have
+    // exhausted retries on the current one.  This prevents flapping between
+    // endpoints when a transient glitch recovers quickly.
     if (conn.consecutive_failures_on_endpoint >= conn.config.max_retries_per_endpoint
         && conn.config.endpoints.size() > 1) {
         advanceToNextEndpoint(conn_idx);
     } else {
+        // Exponential backoff: double the delay each failure, capped at max.
+        // This reduces thundering-herd load on a recovering server.
         conn.current_reconnect_delay_ms_ = std::min(
             static_cast<int>(conn.current_reconnect_delay_ms_ * Defaults::RECONNECT_BACKOFF_MULT),
             Defaults::RECONNECT_MAX_MS);
@@ -785,6 +793,10 @@ void MsgClient::handleConnectFailure(size_t conn_idx, const char* reason) {
 //   Market data can legitimately be quiet for extended periods
 //   (overnight, holidays, pre-open). Forcing a reconnect would
 //   be counter-productive — TCP keepalive handles dead peers.
+//
+// Why check running_ inside the connection loop?
+//   stop() may be called between connection attempts.  Checking running_
+//   after each attempt ensures we don't block shutdown on slow DNS.
 // ============================================================================
 
 // Per-connection receive state (local to ioLoop)
@@ -995,6 +1007,8 @@ void MsgClient::ioLoop() {
                 if (tryActivateConnection(conn_idx)) {
                     recv_states[conn_idx].recv_buf = pool_->allocate(recv_buffer_size_);
                     if (!recv_states[conn_idx].recv_buf) {
+                        // Pool exhaustion is rare but possible under extreme load.
+                        // Close the socket and retry with backoff rather than crashing.
                         LOG_ERR("[MsgClient][Conn %zu] Failed to allocate receive buffer, reconnecting...", conn_idx);
                         closeConnection(conn_idx);
                         handleConnectFailure(conn_idx, "Buffer allocation failed");
@@ -1148,6 +1162,10 @@ void MsgClient::decoderLoop() {
 //   - msg.buffer is reset at the end of the loop iteration.  If the user's
 //     handler captured a copy of the shared_ptr, the buffer stays alive
 //     until the last reference is released (true zero-copy).
+//
+// Why check orders_aggregator_ to decide aggregation?
+//   - All aggregators are created together; checking any one is sufficient.
+//   - Avoids an extra boolean flag and keeps the logic simple.
 // ============================================================================
 
 void MsgClient::workerLoop(size_t worker_index) {
@@ -1186,6 +1204,11 @@ void MsgClient::workerLoop(size_t worker_index) {
 // Extracted from workerLoop() to reduce its length and nesting depth.
 // This helper routes a decoded message to the appropriate aggregator
 // based on its market-data type.  No logic changes — pure refactoring.
+//
+// Why castMessage<> instead of direct reinterpret_cast?
+//   - castMessage validates the body length is large enough for the struct.
+//   - Prevents out-of-bounds reads if the message is truncated or malformed.
+//   - Returns nullptr on mismatch, which we check before dereferencing.
 // ============================================================================
 
 void MsgClient::processAggregationMessage(const SubMessage& msg) {

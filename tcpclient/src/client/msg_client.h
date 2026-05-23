@@ -427,6 +427,12 @@ using MessageHandler = std::function<void(const SubMessage& msg, size_t worker_i
 //
 // All messages hold shared_ptr<Buffer> references into pooled memory;
 // no message data is copied between stages.
+//
+// Thread safety summary:
+//   - IO thread: owns sockets, connections_, recv_states.
+//   - Decoder thread: single consumer of raw_queue_, single producer for all decoded_queues_.
+//   - Worker threads: each owns one decoded_queues_[index]; no cross-worker locking.
+//   - Stats: relaxed atomics; getStats() provides a best-effort snapshot.
 // ============================================================================
 
 class MsgClient {
@@ -463,21 +469,28 @@ private:
     void workerLoop(size_t worker_index);
 
     // Connection helpers
+    // DNS resolution is cached to avoid blocking getaddrinfo() in the hot IO loop.
     bool resolveHost(size_t conn_idx);              // Resolve ALL endpoints for a connection
     bool resolveEndpoint(size_t conn_idx, size_t ep_idx); // Resolve single endpoint
     bool connectToServer(size_t conn_idx);          // Connect to active endpoint
+    // Subscription includes last_received_seq_ so the server can resume streaming.
     bool sendSubscription(size_t conn_idx);
+    // Removes socket from epoll before closing to avoid EBADF in epoll_wait.
     void closeConnection(size_t conn_idx);
     void closeAllSockets();
 
     // IO loop helpers (extracted for readability)
+    // Connect + subscribe + allocate recv buffer in one atomic step.
     bool tryActivateConnection(size_t conn_idx);
+    // Dynamic timeout: wake exactly when the next retry is due (not fixed polling).
     int computeEpollTimeoutMs(
         const std::vector<bool>& connected,
         const std::chrono::steady_clock::time_point& now) const;
+    // Extract complete messages from recv buffer; copy trailing bytes to new buffer.
     size_t parseMessagesFromBuffer(
         size_t conn_idx, const char* buf_data, size_t buf_used,
         const std::shared_ptr<Buffer>& buf_ref, bool& parse_error);
+    // recv() + parse; rotates buffer when partial message remains.
     bool processRecvData(size_t conn_idx, char* buf_data, size_t& buf_used,
                          size_t buf_capacity, std::shared_ptr<Buffer>& buf_ref);
 
@@ -494,7 +507,9 @@ private:
     void initAggregationComponents();
 
     // Failover
+    // Rotate to next endpoint when retries are exhausted; reset backoff.
     void advanceToNextEndpoint(size_t conn_idx);
+    // Exponential backoff capped at RECONNECT_MAX_MS; triggers failover if multi-endpoint.
     void handleConnectFailure(size_t conn_idx, const char* reason);
 
     // Constructor helpers (extracted for readability)
