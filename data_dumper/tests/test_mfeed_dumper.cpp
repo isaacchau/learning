@@ -1,13 +1,13 @@
-#include "upstream/omnet_types.h"
-#include "upstream/omnet_core.h"
-#include "upstream/omnet_market_data.h"
-#include "upstream/omnet_protocol.h"
-#include "generated/nasdaq_omnet_dumps.h"
+#include "upstream/mfeed_types.h"
+#include "upstream/mfeed_core.h"
+#include "upstream/mfeed_market_data.h"
+#include "upstream/mfeed_protocol.h"
+#include "generated/md_mfeed_dumps.h"
 #include <iostream>
 #include <cstring>
 #include <cassert>
 
-using namespace nasdaq::omnet;
+using namespace md::mfeed;
 
 // Helper to remove any potential carriage returns for cross-platform comparison
 std::string clean_string(const std::string& str) {
@@ -33,10 +33,10 @@ void test_login_request() {
     std::string out = clean_string(DataDumper::dump("login_request", login));
     
     std::string expected = 
-        "login_request = nasdaq::omnet::LoginRequest {\n"
-        "  header = nasdaq::omnet::OMnetHeader {\n"
+        "login_request = md::mfeed::LoginRequest {\n"
+        "  header = md::mfeed::MFeedHeader {\n"
         "    message_len = 80\n"
-        "    msg_type = nasdaq::omnet::MsgType::LOGIN_REQUEST\n"
+        "    msg_type = md::mfeed::MsgType::LOGIN_REQUEST\n"
         "    sequence_number = 1\n"
         "    timestamp_ns = 1716584000000000000\n"
         "  }\n"
@@ -63,16 +63,16 @@ void test_market_definition() {
     std::string out = clean_string(DataDumper::dump("market_definition", market));
     
     std::string expected = 
-        "market_definition = nasdaq::omnet::MarketDefinition {\n"
-        "  header = nasdaq::omnet::OMnetHeader {\n"
+        "market_definition = md::mfeed::MarketDefinition {\n"
+        "  header = md::mfeed::MFeedHeader {\n"
         "    message_len = 64\n"
-        "    msg_type = nasdaq::omnet::MsgType::MARKET_DEFINITION\n"
+        "    msg_type = md::mfeed::MsgType::MARKET_DEFINITION\n"
         "    sequence_number = 2\n"
         "    timestamp_ns = 1716584000001000000\n"
         "  }\n"
         "  market_id = \"XNYS\" (4/4)\n"
         "  market_name = \"New York Stock Exchange\" (23/32)\n"
-        "  state = nasdaq::omnet::MarketState::CONTINUOUS\n"
+        "  state = md::mfeed::MarketState::CONTINUOUS\n"
         "  decimals = 4\n"
         "}\n";
 
@@ -90,7 +90,7 @@ void test_order_book_state() {
     book.bid_qty[0] = 500;  book.bid_price[0] = 185.50;
     book.bid_qty[1] = 1200; book.bid_price[1] = 185.45;
     book.bid_qty[2] = 2500; book.bid_price[2] = 185.30;
-
+ 
     book.ask_qty[0] = 800;  book.ask_price[0] = 185.55;
     book.ask_qty[1] = 1500; book.ask_price[1] = 185.60;
     book.ask_qty[2] = 3000; book.ask_price[2] = 185.75;
@@ -98,10 +98,10 @@ void test_order_book_state() {
     std::string out = clean_string(DataDumper::dump("order_book_state", book));
     
     std::string expected = 
-        "order_book_state = nasdaq::omnet::OrderBookState {\n"
-        "  header = nasdaq::omnet::OMnetHeader {\n"
+        "order_book_state = md::mfeed::OrderBookState {\n"
+        "  header = md::mfeed::MFeedHeader {\n"
         "    message_len = 112\n"
-        "    msg_type = nasdaq::omnet::MsgType::ORDER_BOOK_STATE\n"
+        "    msg_type = md::mfeed::MsgType::ORDER_BOOK_STATE\n"
         "    sequence_number = 42\n"
         "    timestamp_ns = 1716584005123456789\n"
         "  }\n"
@@ -139,6 +139,6 @@ int main() {
     std::cout << "Running test_order_book_state()...\n";
     test_order_book_state();
 
-    std::cout << "All OMnet printout verification tests PASSED!\n";
+    std::cout << "All MFeed printout verification tests PASSED!\n";
     return 0;
 }

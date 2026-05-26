@@ -1,12 +1,12 @@
-#ifndef OMNET_CORE_H
-#define OMNET_CORE_H
+#ifndef MFEED_CORE_H
+#define MFEED_CORE_H
 
-#include "omnet_types.h"
+#include "mfeed_types.h"
 
-namespace nasdaq {
-namespace omnet {
+namespace md {
+namespace mfeed {
 
-struct OMnetHeader {
+struct MFeedHeader {
     uint32_t message_len;
     MsgType msg_type;
     uint32_t sequence_number;
@@ -28,7 +28,7 @@ struct TradeLeg {
     char counterparty[8];
 };
 
-} // namespace omnet
-} // namespace nasdaq
+} // namespace mfeed
+} // namespace md
 
-#endif // OMNET_CORE_H
+#endif // MFEED_CORE_H

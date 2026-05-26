@@ -123,6 +123,12 @@ def _extract_nested_types(text, ns_stack, parent_name):
             continue
 
         brace_start = text.find('{', i)
+        semi_start = text.find(';', i)
+
+        if semi_start != -1 and (brace_start == -1 or semi_start < brace_start):
+            i = semi_start + 1
+            continue
+
         if brace_start == -1:
             break
 
@@ -276,6 +282,12 @@ def parse_preprocessed(text):
 
         # Find opening brace
         brace_start = text.find('{', i)
+        semi_start = text.find(';', i)
+
+        if semi_start != -1 and (brace_start == -1 or semi_start < brace_start):
+            i = semi_start + 1
+            continue
+
         if brace_start == -1:
             break
 
@@ -374,7 +386,8 @@ def generate_header(input_headers, structs, enums):
     for qname, fields, ns_stack in structs:
         key = tuple(ns_stack)
         body = []
-        body.append("inline void dd_dump(const {}& val, DataDumper& dd) {{".format(qname))
+        fqname = qname if qname.startswith("::") else "::" + qname
+        body.append("inline void dd_dump(const {}& val, DataDumper& dd) {{".format(fqname))
         for f in fields:
             body.append("  dd.field(\"{}\", val.{});".format(f, f))
         body.append("}")
@@ -399,24 +412,22 @@ def generate_header(input_headers, structs, enums):
 
     # Emit enum specializations at global scope
     for qname, values, is_scoped, ns_stack in sorted(enums, key=lambda x: x[0]):
+        fqname = qname if qname.startswith("::") else "::" + qname
         lines.append("template <>")
-        lines.append("struct EnumTraits<{}> {{".format(qname))
-        lines.append("  static std::string to_string({} val) {{".format(qname))
+        lines.append("struct EnumTraits<{}> {{".format(fqname))
+        lines.append("  static std::string to_string({} val) {{".format(fqname))
         lines.append("    switch (val) {")
         for v in values:
             if is_scoped:
-                lines.append("    case {}::{}: return \"{}::{}\";".format(qname, v, qname, v))
+                lines.append("    case {}::{}: return \"{}::{}\";".format(fqname, v, qname, v))
             else:
-                if ns_stack:
-                    lines.append("    case {}::{}: return \"{}\";".format(qname, v, v))
-                else:
-                    lines.append("    case {}: return \"{}\";".format(v, v))
+                lines.append("    case {}::{}: return \"{}\";".format(fqname, v, v))
         lines.append("    default:")
         lines.append("      break;")
         lines.append("    }")
         lines.append("    std::ostringstream oss;")
         lines.append('    oss << "{}" << "(" <<'.format(qname))
-        lines.append("        static_cast<typename std::underlying_type<{}>::type>(val) << \")\";".format(qname))
+        lines.append("        static_cast<typename std::underlying_type<{}>::type>(val) << \")\";".format(fqname))
         lines.append("    return oss.str();")
         lines.append("  }")
         lines.append("};")

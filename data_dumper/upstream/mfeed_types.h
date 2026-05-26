@@ -1,10 +1,10 @@
-#ifndef OMNET_TYPES_H
-#define OMNET_TYPES_H
+#ifndef MFEED_TYPES_H
+#define MFEED_TYPES_H
 
 #include <cstdint>
 
-namespace nasdaq {
-namespace omnet {
+namespace md {
+namespace mfeed {
 
 enum class MsgType : uint16_t {
     LOGIN_REQUEST = 101,
@@ -48,7 +48,7 @@ enum class MarketState : uint8_t {
     CLOSED = 3
 };
 
-} // namespace omnet
-} // namespace nasdaq
+} // namespace mfeed
+} // namespace md
 
-#endif // OMNET_TYPES_H
+#endif // MFEED_TYPES_H

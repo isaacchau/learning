@@ -82,7 +82,7 @@ struct Point {
 };
 """)
         out = self._run_generator([h])
-        self.assertIn("inline void dd_dump(const Point& val, DataDumper& dd)", out)
+        self.assertIn("inline void dd_dump(const ::Point& val, DataDumper& dd)", out)
         self.assertIn('dd.field("x", val.x);', out)
         self.assertIn('dd.field("y", val.y);', out)
         self._compile()
@@ -101,7 +101,7 @@ struct Config {
         out = self._run_generator([h])
         self.assertIn("namespace api {", out)
         self.assertIn("namespace v2 {", out)
-        self.assertIn("inline void dd_dump(const api::v2::Config& val, DataDumper& dd)", out)
+        self.assertIn("inline void dd_dump(const ::api::v2::Config& val, DataDumper& dd)", out)
         self.assertIn('dd.field("timeout", val.timeout);', out)
         self._compile()
 
@@ -111,9 +111,9 @@ enum class Status { OK, ERROR, TIMEOUT };
 """)
         out = self._run_generator([h])
         self.assertIn("template <>", out)
-        self.assertIn("struct EnumTraits<Status> {", out)
-        self.assertIn("case Status::OK: return \"Status::OK\";", out)
-        self.assertIn("case Status::ERROR: return \"Status::ERROR\";", out)
+        self.assertIn("struct EnumTraits<::Status> {", out)
+        self.assertIn("case ::Status::OK: return \"Status::OK\";", out)
+        self.assertIn("case ::Status::ERROR: return \"Status::ERROR\";", out)
         self._compile()
 
     def test_unscoped_enum_in_namespace(self):
@@ -123,8 +123,8 @@ enum Color { RED, GREEN, BLUE };
 }
 """)
         out = self._run_generator([h])
-        self.assertIn("struct EnumTraits<api::Color> {", out)
-        self.assertIn("case api::Color::RED: return \"RED\";", out)
+        self.assertIn("struct EnumTraits<::api::Color> {", out)
+        self.assertIn("case ::api::Color::RED: return \"RED\";", out)
         self._compile()
 
     def test_nested_include_auto_discovery(self):
@@ -144,8 +144,8 @@ struct Config {{
 """)
         out = self._run_generator([api_h])
         # Both Config and Color should be present
-        self.assertIn("dd_dump(const api::Config& val", out)
-        self.assertIn("EnumTraits<api::Color>", out)
+        self.assertIn("dd_dump(const ::api::Config& val", out)
+        self.assertIn("EnumTraits<::api::Color>", out)
         self._compile()
 
     def test_template_struct_skipped(self):
@@ -232,8 +232,62 @@ struct Stats {
         h1 = self._write_header("a.h", "struct A { int x; };\n")
         h2 = self._write_header("b.h", "struct B { int y; };\n")
         out = self._run_generator([h1, h2])
-        self.assertIn("dd_dump(const A& val", out)
-        self.assertIn("dd_dump(const B& val", out)
+        self.assertIn("dd_dump(const ::A& val", out)
+        self.assertIn("dd_dump(const ::B& val", out)
+        self._compile()
+
+    def test_forward_declarations(self):
+        h = self._write_header("forward.h", """
+struct ForwardStruct;
+class ForwardClass;
+enum class ForwardEnum : int;
+
+struct ValidStruct {
+    int x;
+};
+""")
+        out = self._run_generator([h])
+        # Forward declarations should be skipped, and ValidStruct should be parsed and generated successfully
+        self.assertNotIn("ForwardStruct", out)
+        self.assertNotIn("ForwardClass", out)
+        self.assertNotIn("ForwardEnum", out)
+        self.assertIn("inline void dd_dump(const ::ValidStruct& val, DataDumper& dd)", out)
+        self._compile()
+
+    def test_global_namespace_collision(self):
+        h = self._write_header("collision.h", """
+enum CollisionEnum { VAL_A, VAL_B };
+namespace app {
+enum CollisionEnum { VAL_A, VAL_B };
+struct TestStruct {
+    CollisionEnum local_val;
+    ::CollisionEnum global_val;
+};
+}
+""")
+        out = self._run_generator([h])
+        # Verify fully-qualified naming is used to avoid ambiguity
+        self.assertIn("struct EnumTraits<::CollisionEnum> {", out)
+        self.assertIn("struct EnumTraits<::app::CollisionEnum> {", out)
+        self.assertIn("case ::CollisionEnum::VAL_A: return \"VAL_A\";", out)
+        self.assertIn("case ::app::CollisionEnum::VAL_A: return \"VAL_A\";", out)
+        self._compile()
+
+    def test_large_number_of_types(self):
+        # Generate 75 structs and 75 enums (total 150 types) to verify no capacity capping or issues
+        content = []
+        for i in range(75):
+            content.append(f"enum class Enum_{i} {{ VAL_A, VAL_B }};")
+            content.append(f"struct Struct_{i} {{ int field_1; double field_2; Enum_{i} field_3; }};")
+        
+        h = self._write_header("large.h", "\n".join(content))
+        out = self._run_generator([h])
+        
+        # Verify that all 150 types are present in the generated code
+        for i in range(75):
+            self.assertIn(f"struct EnumTraits<::Enum_{i}> {{", out)
+            self.assertIn(f"inline void dd_dump(const ::Struct_{i}& val, DataDumper& dd)", out)
+        
         self._compile()
 
 

@@ -1,13 +1,13 @@
-#ifndef OMNET_MARKET_DATA_H
-#define OMNET_MARKET_DATA_H
+#ifndef MFEED_MARKET_DATA_H
+#define MFEED_MARKET_DATA_H
 
-#include "omnet_core.h"
+#include "mfeed_core.h"
 
-namespace nasdaq {
-namespace omnet {
+namespace md {
+namespace mfeed {
 
 struct MarketDefinition {
-    OMnetHeader header;
+    MFeedHeader header;
     char market_id[4];
     char market_name[32];
     MarketState state;
@@ -15,7 +15,7 @@ struct MarketDefinition {
 };
 
 struct InstrumentDefinition {
-    OMnetHeader header;
+    MFeedHeader header;
     uint64_t instrument_id;
     char symbol[16];
     char market_id[4];
@@ -25,7 +25,7 @@ struct InstrumentDefinition {
 };
 
 struct OrderBookState {
-    OMnetHeader header;
+    MFeedHeader header;
     uint64_t instrument_id;
     uint32_t bid_qty[3];
     double bid_price[3];
@@ -34,14 +34,14 @@ struct OrderBookState {
 };
 
 struct TradeReport {
-    OMnetHeader header;
+    MFeedHeader header;
     uint64_t match_id;
     char symbol[16];
     uint16_t num_legs;
     TradeLeg legs[4];
 };
 
-} // namespace omnet
-} // namespace nasdaq
+} // namespace mfeed
+} // namespace md
 
-#endif // OMNET_MARKET_DATA_H
+#endif // MFEED_MARKET_DATA_H

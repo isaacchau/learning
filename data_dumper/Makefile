@@ -8,9 +8,9 @@ UPSTREAM_TARGET = data_dumper_upstream_demo
 UPSTREAM_SRC = data_dumper_upstream_demo.cpp
 GENERATED = generated/market_data_dumps.h
 
-OMNET_GENERATED = generated/nasdaq_omnet_dumps.h
-OMNET_TARGET = data_dumper_omnet_demo
-OMNET_TEST_TARGET = tests/test_omnet_dumper
+MFEED_GENERATED = generated/md_mfeed_dumps.h
+MFEED_TARGET = data_dumper_mfeed_demo
+MFEED_TEST_TARGET = tests/test_mfeed_dumper
 
 all: $(TARGET)
 
@@ -20,28 +20,27 @@ $(TARGET): $(SRC) data_dumper.h
 generate:
 	python3 generate_dd_dump.py upstream/market_data.h -o $(GENERATED)
 
-generate_omnet:
-	python3 generate_dd_dump.py upstream/omnet_types.h upstream/omnet_core.h upstream/omnet_market_data.h upstream/omnet_protocol.h -o $(OMNET_GENERATED)
+generate_mfeed:
+	python3 generate_dd_dump.py upstream/mfeed_types.h upstream/mfeed_core.h upstream/mfeed_market_data.h upstream/mfeed_protocol.h -o $(MFEED_GENERATED)
 
 $(UPSTREAM_TARGET): $(UPSTREAM_SRC) data_dumper.h $(GENERATED)
 	$(CXX) $(CXXFLAGS) -o $@ $(UPSTREAM_SRC)
 
-$(OMNET_TARGET): data_dumper_omnet_demo.cpp data_dumper.h $(OMNET_GENERATED)
-	$(CXX) $(CXXFLAGS) -o $@ data_dumper_omnet_demo.cpp
+$(MFEED_TARGET): data_dumper_mfeed_demo.cpp data_dumper.h $(MFEED_GENERATED)
+	$(CXX) $(CXXFLAGS) -o $@ data_dumper_mfeed_demo.cpp
 
-$(OMNET_TEST_TARGET): tests/test_omnet_dumper.cpp data_dumper.h $(OMNET_GENERATED)
-	$(CXX) $(CXXFLAGS) -o $@ tests/test_omnet_dumper.cpp
+$(MFEED_TEST_TARGET): tests/test_mfeed_dumper.cpp data_dumper.h $(MFEED_GENERATED)
+	$(CXX) $(CXXFLAGS) -o $@ tests/test_mfeed_dumper.cpp
 
 upstream_demo: $(UPSTREAM_TARGET)
 
-omnet_demo: $(OMNET_TARGET)
-	./$(OMNET_TARGET)
+mfeed_demo: $(MFEED_TARGET)
+	./$(MFEED_TARGET)
 
-test_omnet: $(OMNET_TEST_TARGET)
-	./$(OMNET_TEST_TARGET)
+test_mfeed: $(MFEED_TEST_TARGET)
+	./$(MFEED_TEST_TARGET)
 
 clean:
-	rm -f $(TARGET) $(UPSTREAM_TARGET) $(OMNET_TARGET) $(OMNET_TEST_TARGET)
+	rm -f $(TARGET) $(UPSTREAM_TARGET) $(MFEED_TARGET) $(MFEED_TEST_TARGET)
 
-.PHONY: all clean generate generate_omnet upstream_demo omnet_demo test_omnet
-
+.PHONY: all clean generate generate_mfeed upstream_demo mfeed_demo test_mfeed

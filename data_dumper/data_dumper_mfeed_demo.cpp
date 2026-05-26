@@ -1,16 +1,16 @@
-#include "upstream/omnet_types.h"
-#include "upstream/omnet_core.h"
-#include "upstream/omnet_market_data.h"
-#include "upstream/omnet_protocol.h"
-#include "generated/nasdaq_omnet_dumps.h"
+#include "upstream/mfeed_types.h"
+#include "upstream/mfeed_core.h"
+#include "upstream/mfeed_market_data.h"
+#include "upstream/mfeed_protocol.h"
+#include "generated/md_mfeed_dumps.h"
 #include <iostream>
 #include <cstring>
 
-using namespace nasdaq::omnet;
+using namespace md::mfeed;
 
 int main() {
     std::cout << "=========================================================\n";
-    std::cout << "      NASDAQ OMnet API DataDumper Demo Application      \n";
+    std::cout << "        MD MFeed API DataDumper Demo Application         \n";
     std::cout << "=========================================================\n\n";
 
     // 1. Session / Protocol Level: Login Request
@@ -105,7 +105,7 @@ int main() {
     std::cout << DataDumper::dump("trade_report", trade) << "\n";
 
     std::cout << "=========================================================\n";
-    std::cout << "      Demo completed successfully!                       \n";
+    std::cout << "        Demo completed successfully!                     \n";
     std::cout << "=========================================================\n";
 
     return 0;
