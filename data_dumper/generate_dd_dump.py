@@ -91,6 +91,28 @@ def clean_preprocessor_directives(text):
     return text
 
 
+def strip_initializer(stmt):
+    """
+    Remove `=` or `{}` in-class initializers from struct field statements
+    while safely ignoring template brackets and parenthesized expressions.
+    """
+    paren_depth = 0
+    bracket_depth = 0
+    for idx, char in enumerate(stmt):
+        if char == '(':
+            paren_depth += 1
+        elif char == ')':
+            paren_depth -= 1
+        elif char == '<':
+            bracket_depth += 1
+        elif char == '>':
+            bracket_depth -= 1
+        elif char in ('=', '{'):
+            if paren_depth == 0 and bracket_depth == 0:
+                return stmt[:idx].strip()
+    return stmt
+
+
 def _extract_nested_types(text, ns_stack, parent_name):
     """
     Find struct/class/enum definitions nested inside a parent type body.
@@ -161,9 +183,10 @@ def _extract_nested_types(text, ns_stack, parent_name):
                     continue
                 if re.search(r'\b(struct|class|enum|union)\s+\w+\s*\{', stmt):
                     continue
+                cleaned_stmt = strip_initializer(stmt)
                 fm = re.search(
                     r'([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[.*?\])*\s*(?::\s*\d+)?\s*$',
-                    stmt
+                    cleaned_stmt
                 )
                 if fm:
                     fields.append(fm.group(1))
@@ -247,6 +270,14 @@ def parse_preprocessed(text):
 
         # Handle namespace
         if keyword == 'namespace':
+            # Check if this is a using namespace directive or a namespace alias
+            # (which contains a semicolon ';' before an opening brace '{')
+            brace_start = text.find('{', i)
+            semi_start = text.find(';', i)
+            if semi_start != -1 and (brace_start == -1 or semi_start < brace_start):
+                i = semi_start + 1
+                continue
+
             m2 = re.match(r'([A-Za-z_][A-Za-z0-9_]*)', text[i:])
             if m2:
                 ns_stack.append(m2.group(1))
@@ -341,9 +372,10 @@ def parse_preprocessed(text):
                 if re.search(r'\b(struct|class|enum|union)\s+\w+\s*\{', stmt):
                     continue
                 # Extract the field name: last identifier before optional arrays/bitfield
+                cleaned_stmt = strip_initializer(stmt)
                 fm = re.search(
                     r'([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[.*?\])*\s*(?::\s*\d+)?\s*$',
-                    stmt
+                    cleaned_stmt
                 )
                 if fm:
                     fields.append(fm.group(1))

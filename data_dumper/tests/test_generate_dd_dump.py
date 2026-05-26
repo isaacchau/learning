@@ -290,6 +290,53 @@ struct TestStruct {
         
         self._compile()
 
+    def test_in_class_initializers(self):
+        h = self._write_header("initializers.h", """
+#include <vector>
+#define DEFAULT_PRIORITY 2
+struct Config {
+    int timeout = 1000;
+    double rate{1.5};
+    int priority = DEFAULT_PRIORITY;
+    std::vector<int> values = {1, 2, 3};
+};
+""")
+        out = self._run_generator([h])
+        # Verify that all fields with in-class initializers are correctly parsed with their correct names
+        self.assertIn('dd.field("timeout", val.timeout);', out)
+        self.assertIn('dd.field("rate", val.rate);', out)
+        self.assertIn('dd.field("priority", val.priority);', out)
+        self.assertIn('dd.field("values", val.values);', out)
+        self._compile()
+
+    def test_namespace_aliases_and_using_directives(self):
+        h = self._write_header("aliases.h", """
+namespace outer {
+    namespace inner {
+        struct Target {
+            int val;
+        };
+    }
+}
+
+namespace alias_ns = outer::inner;
+using namespace outer;
+
+namespace outer {
+    namespace inner {
+        struct SecondTarget {
+            int val;
+        };
+    }
+}
+""")
+        out = self._run_generator([h])
+        # Verify both Target and SecondTarget are generated under the correct qualified names,
+        # meaning namespace alias and using directives did not corrupt the namespace stack.
+        self.assertIn("inline void dd_dump(const ::outer::inner::Target& val, DataDumper& dd)", out)
+        self.assertIn("inline void dd_dump(const ::outer::inner::SecondTarget& val, DataDumper& dd)", out)
+        self._compile()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
