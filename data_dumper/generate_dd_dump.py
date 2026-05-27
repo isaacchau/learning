@@ -225,6 +225,7 @@ def parse_preprocessed(text):
     n = len(text)
     ns_stack = []
     brace_depth = 0
+    ns_pushed_at_depth = {}
 
     # Pattern to detect struct/class/enum keywords
     keyword_re = re.compile(r'\b(namespace|struct|class|enum\s+class|enum)\b')
@@ -248,7 +249,8 @@ def parse_preprocessed(text):
                 i += 1
             if i < n and text[i] == ';':
                 i += 1
-            if brace_depth < len(ns_stack):
+            num_to_pop = ns_pushed_at_depth.pop(brace_depth + 1, 0)
+            for _ in range(num_to_pop):
                 if ns_stack:
                     ns_stack.pop()
             continue
@@ -278,14 +280,21 @@ def parse_preprocessed(text):
                 i = semi_start + 1
                 continue
 
-            m2 = re.match(r'([A-Za-z_][A-Za-z0-9_]*)', text[i:])
+            # Match qualified C++17 nested namespace name (e.g. app::files)
+            m2 = re.match(r'([A-Za-z_][A-Za-z0-9_]*(?:\s*::\s*[A-Za-z_][A-Za-z0-9_]*)*)', text[i:])
+            pushed_count = 0
             if m2:
-                ns_stack.append(m2.group(1))
+                ns_parts = [part.strip() for part in m2.group(1).split('::')]
+                for part in ns_parts:
+                    if part:
+                        ns_stack.append(part)
+                        pushed_count += 1
                 i += m2.end()
             while i < n and text[i].isspace():
                 i += 1
             if i < n and text[i] == '{':
                 brace_depth += 1
+                ns_pushed_at_depth[brace_depth] = pushed_count
                 i += 1
             continue
 

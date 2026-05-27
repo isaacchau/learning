@@ -337,6 +337,56 @@ namespace outer {
         self.assertIn("inline void dd_dump(const ::outer::inner::SecondTarget& val, DataDumper& dd)", out)
         self._compile()
 
+    def test_user_reproduction(self):
+        h1 = self._write_header("h1.h", """
+#pragma once
+namespace app {
+enum Status { ACTIVE, INACTIVE };
+}
+""")
+        h2 = self._write_header("h2.h", f"""
+#pragma once
+#include "{h1}"
+namespace app {{
+namespace files {{
+struct FileInfo {{
+    int id;
+    app::Status status;
+}};
+}}
+}}
+""")
+        h3 = self._write_header("h3.h", f"""
+#pragma once
+#include "{h2}"
+namespace app {{
+namespace internal {{
+struct InternalInfo {{
+    int code;
+    app::Status status;
+}};
+}}
+}}
+""")
+        out = self._run_generator([h1, h2, h3])
+        # Verify both structs are generated under the correct qualified names
+        self.assertIn("FileInfo", out)
+        self.assertIn("InternalInfo", out)
+        self._compile()
+
+    def test_cpp17_nested_namespace(self):
+        h = self._write_header("nested_ns.h", """
+#pragma once
+namespace app::files {
+struct FileInfo {
+    int id;
+};
+}
+""")
+        out = self._run_generator([h])
+        self.assertIn("inline void dd_dump(const ::app::files::FileInfo& val, DataDumper& dd)", out)
+        self._compile()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
