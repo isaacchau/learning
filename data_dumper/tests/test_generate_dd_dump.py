@@ -387,6 +387,42 @@ struct FileInfo {
         self.assertIn("inline void dd_dump(const ::app::files::FileInfo& val, DataDumper& dd)", out)
         self._compile()
 
+    def test_typedef_struct(self):
+        h = self._write_header("typedef_struct.h", """
+#pragma once
+typedef struct {
+    int x;
+    int y;
+} Point;
+
+namespace app {
+typedef struct {
+    double price;
+    int quantity;
+} Order;
+}
+
+typedef struct Line_ {
+    Point start;
+    Point end;
+} Line;
+""")
+        out = self._run_generator([h])
+        # Verify Point
+        self.assertIn("inline void dd_dump(const ::Point& val, DataDumper& dd)", out)
+        self.assertIn('dd.field("x", val.x);', out)
+        self.assertIn('dd.field("y", val.y);', out)
+        # Verify app::Order
+        self.assertIn("inline void dd_dump(const ::app::Order& val, DataDumper& dd)", out)
+        self.assertIn('dd.field("price", val.price);', out)
+        self.assertIn('dd.field("quantity", val.quantity);', out)
+        # Verify Line / Line_
+        self.assertTrue(
+            "inline void dd_dump(const ::Line_& val, DataDumper& dd)" in out or
+            "inline void dd_dump(const ::Line& val, DataDumper& dd)" in out
+        )
+        self._compile()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

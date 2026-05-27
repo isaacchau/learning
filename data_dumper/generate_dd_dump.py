@@ -304,21 +304,29 @@ def parse_preprocessed(text):
         if m2:
             i += m2.end()
 
-        # Skip anonymous structs/unions
+        # Skip anonymous structs/unions unless they are typedef-ed
         if is_struct and not name:
-            brace_start = text.find('{', i)
-            if brace_start == -1:
-                break
-            depth = 1
-            j = brace_start + 1
-            while j < n and depth > 0:
-                if text[j] == '{':
-                    depth += 1
-                elif text[j] == '}':
-                    depth -= 1
-                j += 1
-            i = j
-            continue
+            prev_boundary = max(
+                text.rfind(';', 0, keyword_start),
+                text.rfind('}', 0, keyword_start)
+            )
+            prev_chunk = text[prev_boundary + 1:keyword_start]
+            is_typedef = bool(re.search(r'\btypedef\b', prev_chunk))
+            
+            if not is_typedef:
+                brace_start = text.find('{', i)
+                if brace_start == -1:
+                    break
+                depth = 1
+                j = brace_start + 1
+                while j < n and depth > 0:
+                    if text[j] == '{':
+                        depth += 1
+                    elif text[j] == '}':
+                        depth -= 1
+                    j += 1
+                i = j
+                continue
 
         # Find opening brace
         brace_start = text.find('{', i)
@@ -345,6 +353,14 @@ def parse_preprocessed(text):
         i = j
         while i < n and text[i].isspace():
             i += 1
+
+        if is_struct and not name:
+            # We must have is_typedef since we didn't skip it.
+            # Let's read the typedef name after the closing brace.
+            m_typedef = re.match(r'([A-Za-z_][A-Za-z0-9_]*)', text[i:])
+            if m_typedef:
+                name = m_typedef.group(1)
+                i += m_typedef.end()
 
         if is_struct and name:
             # Skip template definitions: search backward from the keyword to
