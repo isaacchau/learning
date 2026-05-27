@@ -113,6 +113,145 @@ def strip_initializer(stmt):
     return stmt
 
 
+def split_body_into_statements(body):
+    """Split a C++ struct/class body into top-level statements by semicolons,
+    taking into account brace, parenthesis, bracket, and string literal contexts."""
+    stmts = []
+    current = []
+    brace_depth = 0
+    paren_depth = 0
+    bracket_depth = 0
+    in_string = False
+    in_char = False
+    escape = False
+    
+    for char in body:
+        if escape:
+            escape = False
+            current.append(char)
+            continue
+            
+        if char == '\\' and (in_string or in_char):
+            escape = True
+            current.append(char)
+            continue
+            
+        if char == '"' and not in_char:
+            in_string = not in_string
+            current.append(char)
+            continue
+            
+        if char == "'" and not in_string:
+            in_char = not in_char
+            current.append(char)
+            continue
+            
+        if not in_string and not in_char:
+            if char == '{':
+                brace_depth += 1
+            elif char == '}':
+                brace_depth -= 1
+            elif char == '(':
+                paren_depth += 1
+            elif char == ')':
+                paren_depth -= 1
+            elif char == '[':
+                bracket_depth += 1
+            elif char == ']':
+                bracket_depth -= 1
+                
+        if char == ';' and brace_depth == 0 and paren_depth == 0 and bracket_depth == 0 and not in_string and not in_char:
+            stmts.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+            
+    if current:
+        last = "".join(current).strip()
+        if last:
+            stmts.append(last)
+            
+    return stmts
+
+
+def parse_fields_from_body(body):
+    """Parse fields from a struct/class body, handling nested anonymous structs/unions,
+    and returning a list of field names (with prefix if they are nested in an anonymous struct)."""
+    fields = []
+    statements = split_body_into_statements(body)
+    
+    for stmt in statements:
+        stmt = stmt.strip()
+        if not stmt:
+            continue
+        
+        # Skip function declarations
+        if re.search(r'\)\s*$', stmt):
+            continue
+        # Skip typedefs, using, static_assert, friend
+        if re.match(r'\b(typedef|using|static_assert|friend)\b', stmt):
+            continue
+        # Skip access specifiers
+        if re.match(r'\b(public|private|protected)\s*:', stmt):
+            continue
+        # Skip static members
+        if re.match(r'\bstatic\b', stmt):
+            continue
+            
+        # Parse nested brace-block structures
+        brace_start = stmt.find('{')
+        if brace_start != -1:
+            depth = 1
+            j = brace_start + 1
+            n = len(stmt)
+            while j < n and depth > 0:
+                if stmt[j] == '{':
+                    depth += 1
+                elif stmt[j] == '}':
+                    depth -= 1
+                j += 1
+            
+            if depth == 0:
+                inner_body = stmt[brace_start + 1:j - 1]
+                prefix_part = stmt[:brace_start].strip()
+                suffix_part = stmt[j:].strip()
+                
+                m_keyword = re.match(r'^\s*(struct|class|union)\b', prefix_part)
+                if m_keyword:
+                    type_name_part = prefix_part[m_keyword.end():].strip()
+                    m_type_name = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)', type_name_part)
+                    type_name = m_type_name.group(1) if m_type_name else None
+                    
+                    cleaned_suffix = strip_initializer(suffix_part)
+                    m_var = re.search(
+                        r'([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[.*?\])*\s*(?::\s*\d+)?\s*$',
+                        cleaned_suffix
+                    )
+                    var_name = m_var.group(1) if m_var else None
+                    
+                    if type_name:
+                        if var_name:
+                            fields.append(var_name)
+                    else:
+                        nested_fields = parse_fields_from_body(inner_body)
+                        if var_name:
+                            for nf in nested_fields:
+                                fields.append(var_name + "." + nf)
+                        else:
+                            fields.extend(nested_fields)
+                    continue
+        
+        cleaned_stmt = strip_initializer(stmt)
+        fm = re.search(
+            r'([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[.*?\])*\s*(?::\s*\d+)?\s*$',
+            cleaned_stmt
+        )
+        if fm:
+            fields.append(fm.group(1))
+            
+    return fields
+
+
 def _extract_nested_types(text, ns_stack, parent_name):
     """
     Find struct/class/enum definitions nested inside a parent type body.
@@ -168,28 +307,7 @@ def _extract_nested_types(text, ns_stack, parent_name):
 
         if is_struct and name:
             qname = '::'.join(ns_stack + [parent_name, name])
-            fields = []
-            for stmt in body.split(';'):
-                stmt = stmt.strip()
-                if not stmt:
-                    continue
-                if re.search(r'\)\s*$', stmt):
-                    continue
-                if re.match(r'\b(typedef|using|static_assert|friend)\b', stmt):
-                    continue
-                if re.match(r'\b(public|private|protected)\s*:', stmt):
-                    continue
-                if re.match(r'\bstatic\b', stmt):
-                    continue
-                if re.search(r'\b(struct|class|enum|union)\s+\w+\s*\{', stmt):
-                    continue
-                cleaned_stmt = strip_initializer(stmt)
-                fm = re.search(
-                    r'([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[.*?\])*\s*(?::\s*\d+)?\s*$',
-                    cleaned_stmt
-                )
-                if fm:
-                    fields.append(fm.group(1))
+            fields = parse_fields_from_body(body)
             if fields:
                 structs.append((qname, fields, list(ns_stack)))
                 nested_s, nested_e = _extract_nested_types(body, ns_stack, parent_name + '::' + name)
@@ -376,34 +494,7 @@ def parse_preprocessed(text):
                 continue
 
             qname = '::'.join(ns_stack + [name])
-            fields = []
-            for stmt in body.split(';'):
-                stmt = stmt.strip()
-                if not stmt:
-                    continue
-                # Skip function declarations (contain ( ... ) before ;)
-                if re.search(r'\)\s*$', stmt):
-                    continue
-                # Skip typedefs, using, static_assert, friend
-                if re.match(r'\b(typedef|using|static_assert|friend)\b', stmt):
-                    continue
-                # Skip access specifiers
-                if re.match(r'\b(public|private|protected)\s*:', stmt):
-                    continue
-                # Skip static members
-                if re.match(r'\bstatic\b', stmt):
-                    continue
-                # Skip nested type definitions without a trailing field name
-                if re.search(r'\b(struct|class|enum|union)\s+\w+\s*\{', stmt):
-                    continue
-                # Extract the field name: last identifier before optional arrays/bitfield
-                cleaned_stmt = strip_initializer(stmt)
-                fm = re.search(
-                    r'([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[.*?\])*\s*(?::\s*\d+)?\s*$',
-                    cleaned_stmt
-                )
-                if fm:
-                    fields.append(fm.group(1))
+            fields = parse_fields_from_body(body)
             if fields:
                 structs.append((qname, fields, list(ns_stack)))
                 nested_s, nested_e = _extract_nested_types(body, ns_stack, name)

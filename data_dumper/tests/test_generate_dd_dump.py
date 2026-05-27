@@ -423,6 +423,62 @@ typedef struct Line_ {
         )
         self._compile()
 
+    def test_inline_anonymous_union(self):
+        h = self._write_header("anonymous_union.h", """
+#pragma once
+struct TypeA { int val; };
+struct TypeB { double val; };
+typedef struct {
+    union {
+        TypeA varA;
+        TypeB varB;
+    };
+    int normalField;
+} MyStruct;
+""")
+        out = self._run_generator([h])
+        self.assertIn("inline void dd_dump(const ::MyStruct& val, DataDumper& dd)", out)
+        self.assertIn('dd.field("varA", val.varA);', out)
+        self.assertIn('dd.field("varB", val.varB);', out)
+        self.assertIn('dd.field("normalField", val.normalField);', out)
+        self._compile()
+
+    def test_nested_anonymous_struct(self):
+        h = self._write_header("anonymous_struct.h", """
+#pragma once
+typedef struct {
+    struct {
+        int a;
+        int b;
+    } inline_var;
+    double c;
+} MyStruct;
+""")
+        out = self._run_generator([h])
+        self.assertIn("inline void dd_dump(const ::MyStruct& val, DataDumper& dd)", out)
+        self.assertIn('dd.field("inline_var.a", val.inline_var.a);', out)
+        self.assertIn('dd.field("inline_var.b", val.inline_var.b);', out)
+        self.assertIn('dd.field("c", val.c);', out)
+        self._compile()
+
+    def test_deeply_nested_anonymous_struct(self):
+        h = self._write_header("deeply_nested.h", """
+#pragma once
+struct DeepStruct {
+    struct {
+        struct {
+            int x;
+        } inner_inner;
+        int y;
+    } inner;
+};
+""")
+        out = self._run_generator([h])
+        self.assertIn("inline void dd_dump(const ::DeepStruct& val, DataDumper& dd)", out)
+        self.assertIn('dd.field("inner.inner_inner.x", val.inner.inner_inner.x);', out)
+        self.assertIn('dd.field("inner.y", val.inner.y);', out)
+        self._compile()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
