@@ -479,6 +479,137 @@ struct DeepStruct {
         self.assertIn('dd.field("inner.y", val.inner.y);', out)
         self._compile()
 
+    def test_filler_fields_skipped(self):
+        h = self._write_header("filler.h", """
+#pragma once
+struct Config {
+    int value;
+    char filler_0[4];
+    int another_value;
+    char FILLER_1[8];
+};
+""")
+        out = self._run_generator([h])
+        self.assertIn('dd.field("value", val.value);', out)
+        self.assertIn('dd.field("another_value", val.another_value);', out)
+        self.assertNotIn("filler_0", out)
+        self.assertNotIn("FILLER_1", out)
+        self._compile()
+
+    def test_nested_anonymous_struct_array(self):
+        h = self._write_header("anon_array.h", """
+#pragma once
+typedef struct {
+    int id;
+} Price;
+
+typedef struct {
+    int val;
+} Qty64;
+
+typedef enum {
+    TYPE_A,
+    TYPE_B
+} ItemType;
+
+typedef struct {
+    struct {
+        union { 
+            Price price;
+            Qty64 qty;
+        };
+        ItemType   type;
+        char       filler_0[1];
+    } items[3];
+} ItemBody;
+""")
+        out = self._run_generator([h])
+        self.assertIn("inline void dd_dump(const ::ItemBody& val, DataDumper& dd)", out)
+        self.assertIn('dd.begin_array("items", sizeof(val.items) / sizeof(val.items[0]));', out)
+        self.assertIn('dd.begin_array_element(i);', out)
+        self.assertIn('dd.field("price", val.items[i].price);', out)
+        self.assertIn('dd.field("qty", val.items[i].qty);', out)
+        self.assertIn('dd.field("type", val.items[i].type);', out)
+        self.assertNotIn("filler_0", out)
+        self.assertIn('dd.end_array_element();', out)
+        self.assertIn('dd.end_array();', out)
+        self._compile()
+
+    def test_nested_anonymous_struct_array_execution(self):
+        h = self._write_header("anon_array_exec.h", """
+#pragma once
+typedef struct {
+    int id;
+} Price;
+
+typedef struct {
+    int val;
+} Qty64;
+
+typedef enum {
+    TYPE_A,
+    TYPE_B
+} ItemType;
+
+typedef struct {
+    struct {
+        union { 
+            Price price;
+            Qty64 qty;
+        };
+        ItemType   type;
+        char       filler_0[1];
+    } items[3];
+} ItemBody;
+""")
+        self._run_generator([h])
+        
+        # Compile and run a full validation binary
+        test_cpp = os.path.join(self.tmpdir, "exec_test.cpp")
+        with open(test_cpp, "w") as f:
+            f.write(f'''
+#include "{self.generated}"
+#include <iostream>
+#include <cassert>
+
+int main() {{
+    ItemBody body;
+    body.items[0].price.id = 100;
+    body.items[0].type = TYPE_A;
+    body.items[1].qty.val = 200;
+    body.items[1].type = TYPE_B;
+    body.items[2].price.id = 300;
+    body.items[2].type = TYPE_A;
+
+    std::string dump = DataDumper::dump("body", body);
+    std::cout << dump << std::endl;
+
+    assert(dump.find("items = [3] {{") != std::string::npos);
+    assert(dump.find("[0] = {{") != std::string::npos);
+    assert(dump.find("price = Price {{") != std::string::npos);
+    assert(dump.find("id = 100") != std::string::npos);
+    assert(dump.find("filler") == std::string::npos);
+    return 0;
+}}
+''')
+        
+        bin_path = os.path.join(self.tmpdir, "exec_test_bin")
+        cmd_compile = [
+            "g++", "-std=c++14", "-Wall", "-Wextra",
+            "-I", PROJECT_ROOT,
+            "-I", self.tmpdir,
+            test_cpp, "-o", bin_path
+        ]
+        result = subprocess.run(cmd_compile, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, f"Compilation failed: {result.stderr}")
+        
+        result_run = subprocess.run([bin_path], capture_output=True, text=True)
+        self.assertEqual(result_run.returncode, 0, f"Execution failed: {result_run.stderr}")
+        self.assertIn("items = [3] {", result_run.stdout)
+        self.assertIn("price = Price {", result_run.stdout)
+        self.assertIn("id = 100", result_run.stdout)
+        self.assertNotIn("filler", result_run.stdout)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

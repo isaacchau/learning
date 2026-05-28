@@ -57,6 +57,34 @@ public:
         out_ << "}";
     }
 
+    // Begin an array block with a size
+    void begin_array(const char* name, size_t size) {
+        indent();
+        out_ << name << " = [" << size << "] {\n";
+        ++depth_;
+    }
+
+    // End an array block
+    void end_array() {
+        --depth_;
+        indent();
+        out_ << "}\n";
+    }
+
+    // Begin an array element block
+    void begin_array_element(size_t index) {
+        indent();
+        out_ << "[" << index << "] = {\n";
+        ++depth_;
+    }
+
+    // End an array element block
+    void end_array_element() {
+        --depth_;
+        indent();
+        out_ << "}\n";
+    }
+
     // Print one field
     template <typename T>
     void field(const char* name, const T& value) {
